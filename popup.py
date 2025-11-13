@@ -13,6 +13,10 @@ Features:
 
 import os
 import logging
+
+import tempfile
+import os
+
 import base64
 from io import BytesIO
 import cv2
@@ -333,6 +337,11 @@ class PopupWindow(QWidget):
         # Default opacity for copy icons (prevents AttributeError)
         self.copy_icon_opacity = 0.6
 
+        self.selected_content_mode = "text"  # Default capture mode
+        self.layout_type = "text"
+        self.layout_confidence = 1.0
+        self.override_table_model = False
+        
         # Initialize UI and logic
         self._init_scroll_ui()
         self._init_window_zoom_controls()
@@ -689,15 +698,25 @@ class PopupWindow(QWidget):
         # Default capture mode
         self.selected_content_mode = "text"
 
-        def _on_mode_changed():
+        def _on_mode_changed(index):
+            """Handle content mode dropdown changes."""
             mode = self.mode_dropdown.currentText()
             if mode == "Text":
                 self.selected_content_mode = "text"
+                logger.info("Capture mode: TEXT")
             elif mode == "Tables":
                 self.selected_content_mode = "table"
-            else:
+                logger.info("Capture mode: TABLE")
+            elif mode == "Maths Equations":
                 self.selected_content_mode = "math"
+                logger.info("Capture mode: MATH")
+            
+            # Show brief feedback
+            self.status_label.setText(f"Mode: {self.selected_content_mode.title()}")
+            self.status_label.setVisible(True)
+            QTimer.singleShot(1500, lambda: self.status_label.setVisible(False))
 
+        # Connect the signal
         self.mode_dropdown.currentIndexChanged.connect(_on_mode_changed)
 
         header_layout.addWidget(self.mode_dropdown)
@@ -2049,7 +2068,8 @@ class PopupWindow(QWidget):
 
     def _start_ocr_worker(self, image, x, y, w, h):
         """Start OCR processing (with async preview load)."""
-        # 1) Start preview thread (unchanged)
+        
+        # 1) Start preview thread
         self._preview_thread = QThread()
         self._preview_worker = self._PreviewLoaderWorker(image)
         self._preview_worker.moveToThread(self._preview_thread)
@@ -2060,39 +2080,43 @@ class PopupWindow(QWidget):
         self._preview_thread.finished.connect(self._preview_thread.deleteLater)
         self._preview_thread.start()
 
-        # 2) Layout type
+        # 2) Determine layout type from selected mode
         if self.selected_content_mode == "text":
             layout_type = "text"
+            override_model = False
         elif self.selected_content_mode == "table":
             layout_type = "table"
+            override_model = True  # Use Gemini Pro for tables
         elif self.selected_content_mode == "math":
             layout_type = "math"
+            override_model = False
         else:
             layout_type = "text"
+            override_model = False
 
         layout_conf = 1.0
 
-        self.override_table_model = (layout_type == "table")
-        self.layout_type = layout_type
-        self.layout_confidence = layout_conf
+        # 3) Save temp image
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
+        os.close(temp_fd)
+        image.save(temp_path)
 
-        # 3) Save image → temp path
-        temp_path = capture.save_temp_image(image)
-
-        # 4) FIXED: Define parameters for OCRWorker
-        do_translate = False  
-        translate_lang = self.trans_codes[self.trans_lang.currentText()]
-
-        # 5) Start OCR thread
+        # 4) Create OCR worker with all required parameters
         self.thread = QThread()
         self.worker = OCRWorker(
             temp_path,
             self.config,
-            do_translate,
-            translate_lang,
+            do_translate=False,  # Translation is separate
+            dest_lang="en"
         )
-        self.worker.override_table_model = self.override_table_model
+        
+        # Set layout detection parameters
+        self.worker.layout_type = layout_type
+        self.worker.layout_confidence = layout_conf
+        self.worker.override_table_model = override_model
 
+        # 5) Connect signals and start
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self._on_ocr_done)
@@ -2103,6 +2127,8 @@ class PopupWindow(QWidget):
         self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
 
+        logger.info(f"Started OCR worker: mode={layout_type}, override={override_model}")
+        
     def _on_preview_loaded(self, pixmap):
         """Receive pixmap from background worker and display it correctly."""
         if pixmap is None:
@@ -2120,14 +2146,26 @@ class PopupWindow(QWidget):
         except Exception as e:
             logger.warning(f"Preview display failed: {e}")
 
+
     def _on_ocr_done(self, text, translated):
         """Handle OCR completion - hide loader BEFORE showing text."""
+        # Handle dict results from Gemini (math mode with images)
+        if isinstance(text, dict):
+            # Extract text component
+            actual_text = text.get("text", "")
+            # Store additional data if needed
+            if "math_images" in text:
+                self._math_images = text["math_images"]
+            if "math_omml" in text:
+                self._math_omml = text["math_omml"]
+            text = actual_text
+        
         # Hide loader first (no delay)
         self._hide_loader(self.loader_extracted, delay_ms=0)
         
         # Wait for hide animation, then show text
         QTimer.singleShot(150, lambda: self._display_ocr_result(text, translated))
-
+        
     def _display_ocr_result(self, text, translated):
         """Display OCR results after loader is hidden."""
         try:
@@ -2266,6 +2304,11 @@ class PopupWindow(QWidget):
             self.extracted_box.setPlainText("")
             return
         
+        # Handle dict results from math mode (with images/OMML)
+        if isinstance(text, dict):
+            text = text.get("text", "")
+            # TODO: Handle math_images and math_omml if needed
+        
         # Step 1: Process math formulas
         text = process_ocr_text_with_math(text, for_display=True)
         
@@ -2277,6 +2320,7 @@ class PopupWindow(QWidget):
             styled_html = self._apply_content_styling(text)
             
             # For display: Show placeholder for complex math
+            import re
             display_html = re.sub(
                 r'<math[^>]*>(.*?)</math>',
                 lambda m: self._create_math_placeholder(m.group(0)),
@@ -2298,8 +2342,7 @@ class PopupWindow(QWidget):
             self._last_full_html = prepare_math_for_clipboard(html_content)
             
             logger.info("Rendered plain text with formatting")
-
-
+            
     def _create_math_placeholder(self, mathml: str) -> str:
         """
         Create a visual placeholder for MathML in the app.

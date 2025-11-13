@@ -1,4 +1,4 @@
-# core/postprocess.py - ENHANCED MATH SUPPORT (updated)
+# core/postprocess.py - COMPLETE FIXED VERSION
 import re
 import unicodedata
 import logging
@@ -14,250 +14,492 @@ except Exception:
     _HAS_INDIC = False
     _normalizer = None
 
-# ... (keep all your existing functions unchanged above: clean_hindi_text,
-# normalize_bullets, convert_latex_to_mathml, _latex_to_unicode_fallback, 
-# _latex_to_unicode_single, enhance_math_display, prepare_math_for_clipboard,
-# process_ocr_text_with_math, render_latex_to_image, convert_mathml_to_omml)
-#
-# (I assume the previous contents remain exactly as you provided — they are unchanged.)
-#
-# -------------------------------------------------------------------------
-# NEW: Mode-specific processing functions
-# -------------------------------------------------------------------------
+# ===================================================================
+# CORE TEXT PROCESSING FUNCTIONS
+# ===================================================================
 
-# Helper: remove emojis and unwanted symbol noise
+def clean_hindi_text(text: str) -> str:
+    """Clean and normalize Hindi/Devanagari text."""
+    if not text:
+        return ""
+    
+    # Use IndicNLP normalizer if available
+    if _HAS_INDIC and _normalizer:
+        try:
+            text = _normalizer.normalize(text)
+        except Exception as e:
+            logger.warning(f"IndicNLP normalization failed: {e}")
+    
+    # Unicode normalization
+    text = unicodedata.normalize('NFC', text)
+    
+    # Remove zero-width characters
+    text = re.sub(r'[\u200b-\u200f\ufeff]', '', text)
+    
+    return text.strip()
+
+
+def normalize_bullets(text: str) -> str:
+    """
+    Normalize various bullet point symbols to standard bullets.
+    Preserves numbered lists.
+    """
+    if not text:
+        return ""
+    
+    # Map of bullet variants to standard bullet
+    bullet_map = {
+        '●': '•',
+        '○': '•',
+        '◦': '•',
+        '∘': '•',
+        '∙': '•',
+        '·': '•',
+        '⦿': '•',
+        '⦾': '•',
+        '⦁': '•',
+        '▪': '•',
+        '▫': '•',
+        '■': '•',
+        '□': '•',
+        '◆': '•',
+        '◇': '•',
+        '►': '•',
+        '‣': '•',
+        '⁃': '•',
+        '⁌': '•',
+        '⁍': '•',
+    }
+    
+    # Replace bullet variants
+    for old, new in bullet_map.items():
+        text = text.replace(old, new)
+    
+    # Normalize dash-style bullets (but not within words)
+    text = re.sub(r'^(\s*)[-–—]\s+', r'\1• ', text, flags=re.MULTILINE)
+    
+    # Ensure space after bullet
+    text = re.sub(r'•([^\s])', r'• \1', text)
+    
+    return text
+
+
+# ===================================================================
+# LATEX / MATHML CONVERSION
+# ===================================================================
+
+def convert_latex_to_mathml(text: str) -> str:
+    """
+    Convert LaTeX math expressions to MathML.
+    Handles both inline ($...$) and display ($$...$$) math.
+    """
+    if not text or '$' not in text:
+        return text
+    
+    try:
+        from latex2mathml import converter
+        _HAS_LATEX2MATHML = True
+    except ImportError:
+        _HAS_LATEX2MATHML = False
+        logger.warning("latex2mathml not available, using unicode fallback")
+    
+    def convert_math(match):
+        latex_expr = match.group(1).strip()
+        is_display = match.group(0).startswith('$$')
+        
+        if _HAS_LATEX2MATHML:
+            try:
+                mathml = converter.convert(latex_expr)
+                # Add display attribute for block equations
+                if is_display and '<math' in mathml:
+                    mathml = mathml.replace('<math>', '<math display="block">')
+                return mathml
+            except Exception as e:
+                logger.warning(f"LaTeX conversion failed for '{latex_expr}': {e}")
+        
+        # Fallback to unicode representation
+        return _latex_to_unicode_fallback(latex_expr, is_display)
+    
+    # Convert display math ($$...$$)
+    text = re.sub(r'\$\$(.+?)\$\$', convert_math, text, flags=re.DOTALL)
+    
+    # Convert inline math ($...$)
+    text = re.sub(r'\$(.+?)\$', convert_math, text)
+    
+    return text
+
+
+def _latex_to_unicode_fallback(latex_expr: str, is_display: bool = False) -> str:
+    """
+    Fallback: Convert common LaTeX symbols to Unicode.
+    Used when latex2mathml is not available.
+    """
+    # Common LaTeX symbol mappings
+    symbols = {
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ',
+        r'\epsilon': 'ε', r'\theta': 'θ', r'\lambda': 'λ', r'\mu': 'μ',
+        r'\pi': 'π', r'\sigma': 'σ', r'\phi': 'φ', r'\omega': 'ω',
+        r'\sum': '∑', r'\int': '∫', r'\infty': '∞',
+        r'\leq': '≤', r'\geq': '≥', r'\neq': '≠',
+        r'\approx': '≈', r'\equiv': '≡',
+        r'\times': '×', r'\div': '÷', r'\pm': '±',
+        r'\sqrt': '√', r'\in': '∈', r'\subset': '⊂',
+    }
+    
+    result = latex_expr
+    for latex, unicode_char in symbols.items():
+        result = result.replace(latex, unicode_char)
+    
+    # Handle superscripts and subscripts
+    result = _latex_to_unicode_single(result)
+    
+    # Wrap in styling
+    if is_display:
+        return f'<div style="text-align: center; font-size: 1.2em; margin: 10px 0;">{result}</div>'
+    else:
+        return f'<span style="font-style: italic;">{result}</span>'
+
+
+def _latex_to_unicode_single(text: str) -> str:
+    """Convert simple superscripts (^) and subscripts (_) to Unicode."""
+    # Superscript mapping
+    superscripts = {
+        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+        '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+        '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾',
+        'n': 'ⁿ', 'i': 'ⁱ'
+    }
+    
+    # Subscript mapping
+    subscripts = {
+        '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+        '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+        '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎'
+    }
+    
+    # Replace ^{...} with superscripts
+    def replace_super(match):
+        chars = match.group(1)
+        return ''.join(superscripts.get(c, c) for c in chars)
+    
+    # Replace _{...} with subscripts
+    def replace_sub(match):
+        chars = match.group(1)
+        return ''.join(subscripts.get(c, c) for c in chars)
+    
+    text = re.sub(r'\^{([^}]+)}', replace_super, text)
+    text = re.sub(r'_{([^}]+)}', replace_sub, text)
+    
+    return text
+
+
+# ===================================================================
+# MATHML DISPLAY ENHANCEMENT
+# ===================================================================
+
+def enhance_math_display(html_with_mathml: str) -> str:
+    """
+    Add visual styling to MathML for better display.
+    """
+    if not html_with_mathml or '<math' not in html_with_mathml:
+        return html_with_mathml
+    
+    # Add styling attributes to math tags
+    def style_math(match):
+        math_tag = match.group(0)
+        if 'xmlns' not in math_tag:
+            math_tag = math_tag.replace('<math', '<math xmlns="http://www.w3.org/1998/Math/MathML"')
+        if 'style' not in math_tag:
+            math_tag = math_tag.replace('<math', '<math style="font-family: Cambria Math, STIXGeneral; font-size: 1.1em;"')
+        return math_tag
+    
+    html_with_mathml = re.sub(r'<math[^>]*>', style_math, html_with_mathml)
+    
+    return html_with_mathml
+
+
+def prepare_math_for_clipboard(html: str) -> str:
+    """
+    Prepare HTML with MathML for clipboard (Word compatibility).
+    Ensures proper XML namespaces and encoding.
+    """
+    if not html or '<math' not in html:
+        return html
+    
+    # Ensure MathML namespace
+    html = re.sub(
+        r'<math(?![^>]*xmlns)',
+        '<math xmlns="http://www.w3.org/1998/Math/MathML"',
+        html
+    )
+    
+    # Unescape any escaped MathML tags
+    html = html.replace('&lt;math', '<math')
+    html = html.replace('&lt;/math&gt;', '</math>')
+    html = html.replace('&lt;', '<').replace('&gt;', '>')
+    
+    return html
+
+
+def process_ocr_text_with_math(text: str, for_display: bool = True) -> str:
+    """
+    Process OCR text that may contain mathematical formulas.
+    Converts LaTeX to MathML and enhances display.
+    """
+    if not text:
+        return ""
+    
+    # Convert LaTeX to MathML
+    text = convert_latex_to_mathml(text)
+    
+    # Enhance for display
+    if for_display and '<math' in text:
+        text = enhance_math_display(text)
+    
+    return text
+
+
+# ===================================================================
+# MATHML TO OMML CONVERSION (for Word)
+# ===================================================================
+
+def convert_mathml_to_omml(mathml: str) -> str:
+    """
+    Convert MathML to Office Math Markup Language (OMML).
+    Simplified conversion for basic compatibility.
+    """
+    if not mathml or '<math' not in mathml:
+        return mathml
+    
+    # This is a placeholder - full OMML conversion requires XSLT
+    # For now, we'll just ensure proper namespace
+    omml = mathml.replace(
+        'xmlns="http://www.w3.org/1998/Math/MathML"',
+        'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
+    )
+    
+    return omml
+
+
+# ===================================================================
+# LATEX TO IMAGE RENDERING
+# ===================================================================
+
+def render_latex_to_image(latex_expr: str, output_path: str) -> str:
+    """
+    Render LaTeX expression to PNG image.
+    Returns the path to the generated image, or None on failure.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        from matplotlib import mathtext
+        
+        # Create figure
+        fig = plt.figure(figsize=(4, 1))
+        fig.text(0.5, 0.5, f'${latex_expr}$', 
+                fontsize=16, ha='center', va='center')
+        
+        # Save to file
+        plt.axis('off')
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', 
+                   pad_inches=0.1, transparent=True)
+        plt.close(fig)
+        
+        logger.info(f"Rendered LaTeX to image: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.warning(f"LaTeX image rendering failed: {e}")
+        return None
+
+
+# ===================================================================
+# EMOJI AND SYMBOL CLEANUP
+# ===================================================================
+
 _EMOJI_PATTERN = re.compile(
     "[" 
     "\U0001F300-\U0001F5FF"  # symbols & pictographs
     "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F680-\U0001F6FF"  # transport & map symbols
+    "\U0001F680-\U0001F6FF"  # transport & map
     "\U00002600-\U000026FF"  # misc symbols
     "\U00002700-\U000027BF"  # dingbats
-    "\U0001F900-\U0001F9FF"  # supplemental symbols and pictographs
-    "\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+    "\U0001F900-\U0001F9FF"  # supplemental symbols
+    "\U0001FA70-\U0001FAFF"  # extended-A
     "]+", flags=re.UNICODE
 )
 
 _SYMBOL_CLEAN_PATTERN = re.compile(r"[■◆►✔✖✦✪✷✸✹✺✻]", flags=re.UNICODE)
 
+
 def _remove_emojis_and_symbols(text: str) -> str:
-    """Remove emoji and certain decorative symbols, keep bullets (•) and essential punctuation."""
+    """Remove emojis and decorative symbols, keep bullets and punctuation."""
     if not text:
         return ""
-    # Replace emoji ranges with empty string
+    
     text = _EMOJI_PATTERN.sub("", text)
-    # Remove a set of decorative symbols that commonly pollute OCR
     text = _SYMBOL_CLEAN_PATTERN.sub("", text)
-    # Trim extra whitespace created by removals
     text = re.sub(r"\s{2,}", " ", text)
+    
     return text.strip()
 
+
+# ===================================================================
+# LIST NORMALIZATION
+# ===================================================================
 
 def _normalize_numbered_lists(text: str) -> str:
     """Normalize different numbered list formats into '1.' style."""
     if not text:
         return ""
-    # convert "1 )", "1)", "1 -" etc -> "1."
+    
+    # Convert "1)", "1 -", etc. to "1."
     text = re.sub(r"^(\s*)(\d+)\s*[\.\)\-]\s+", r"\1\2. ", text, flags=re.MULTILINE)
-    # ensure space after number + dot
+    
+    # Ensure space after number
     text = re.sub(r"^(\s*\d+)\.(?!\s)", r"\1. ", text, flags=re.MULTILINE)
+    
     return text
 
 
 def _normalize_indentation(text: str) -> str:
-    """Make indentation consistent using 2-space per level for display/plain text outputs."""
+    """Make indentation consistent using 2-space per level."""
     if not text:
         return ""
+    
     lines = text.splitlines()
     norm_lines = []
+    
     for ln in lines:
-        # convert tabs to spaces
+        # Convert tabs to spaces
         ln = ln.replace("\t", "    ")
-        # collapse runs of 4 spaces into 2 (for gentler indentation)
+        
+        # Collapse 4-space indents to 2-space
         ln = re.sub(r"^(?: {4})+", lambda m: "  " * (len(m.group(0)) // 4), ln)
-        # Remove stray leading/trailing spaces (but preserve indentation)
+        
+        # Preserve indentation but trim trailing spaces
         leading = re.match(r"^(\s*)", ln).group(1)
         content = ln[len(leading):].rstrip()
         norm_lines.append(leading + content)
+    
     return "\n".join(norm_lines)
 
 
 def _cleanup_paragraph_spacing(text: str) -> str:
-    """Ensure single blank line between paragraphs, and trim edges."""
+    """Ensure single blank line between paragraphs."""
     if not text:
         return ""
-    # Normalize CRLF
+    
+    # Normalize line endings
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Remove excessive blank lines (keep max one)
+    
+    # Remove excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # Trim whitespace
-    text = text.strip()
-    return text
+    
+    return text.strip()
 
 
-def _smart_linebreaks_text(text: str) -> str:
-    """
-    Improve line-breaks: keep lines that are continuous (not sentence breaks),
-    insert breaks before bullets/numbers/headers.
-    This is intentionally conservative (prefers not to merge separate lines).
-    """
-    if not text:
-        return ""
-    # If text looks like HTML or table, return as-is (text-mode expects plain text)
-    if any(tag in text.lower() for tag in ["<table", "<tr", "<td", "<ul", "<ol", "<li>", "<math"]):
-        return text
-
-    # Normalize spaces
-    text = re.sub(r"[ \t]+", " ", text)
-    lines = [ln.rstrip() for ln in text.split("\n")]
-
-    out_lines = []
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        if not s:
-            out_lines.append("")
-            continue
-
-        # If current line ends with a sentence end marker, keep break
-        if re.search(r"[.!?:;\u0964]\s*$", s):
-            out_lines.append(s)
-            continue
-
-        # If next line starts with lowercase, it's probably a continuation -> merge
-        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
-        if nxt and nxt and nxt[0].islower() and not re.match(r"^[\-\*\u2022\u25CF\u25CB\u25E6\u2023\u25AA\u25AB]", nxt):
-            # merge current and next if the current line doesn't end with punctuation
-            if out_lines and out_lines[-1] and not out_lines[-1].endswith((" ", "-", "—")):
-                out_lines.append(s + " ")
-            else:
-                out_lines.append(s + " ")
-        else:
-            out_lines.append(s)
-
-    # Join where we can: merge lines that were intentionally concatenated
-    merged = []
-    buffer = ""
-    for line in out_lines:
-        if line.endswith(" "):
-            buffer += line
-        else:
-            if buffer:
-                buffer += line
-                merged.append(buffer.strip())
-                buffer = ""
-            else:
-                merged.append(line)
-    if buffer:
-        merged.append(buffer.strip())
-
-    return ("\n\n".join(merged)).strip()
-
+# ===================================================================
+# HTML TABLE PROCESSING
+# ===================================================================
 
 def _strip_html_styles(html: str) -> str:
-    """Remove inline style attributes and color attributes to produce a clean grid-like table."""
+    """Remove inline styles and color attributes from HTML."""
     if not html:
         return ""
-    # Remove style="..." entirely
+    
+    # Remove style attributes
     html = re.sub(r'\sstyle="[^"]*"', "", html, flags=re.IGNORECASE)
-    # Remove bgcolor / color attributes
+    
+    # Remove color/size attributes
     html = re.sub(r'\s(?:bgcolor|color|width|height)="[^"]*"', "", html, flags=re.IGNORECASE)
-    # Remove class attributes that might carry styling
+    
+    # Remove class attributes
     html = re.sub(r'\sclass="[^"]*"', "", html, flags=re.IGNORECASE)
-    # Remove inline CSS comments
-    html = re.sub(r'/\*.*?\*/', '', html, flags=re.DOTALL)
+    
     return html
 
 
 def _normalize_bullets_in_html(html: str) -> str:
-    """Replace various bullet characters inside HTML text nodes with single '•'."""
+    """Replace various bullet characters in HTML with standard bullet."""
     if not html:
         return ""
-    # Normalize common bullet chars
+    
     html = re.sub(r'[●○◦∘∙·⦿⦾⦁\-\*]+', '•', html)
-    # Ensure bullet followed by space
     html = re.sub(r'(•)([^\s<])', r'\1 \2', html)
+    
     return html
 
+
+# ===================================================================
+# MODE-SPECIFIC PROCESSING PIPELINES
+# ===================================================================
 
 def clean_text_mode_output(text: str) -> str:
     """
     Text mode pipeline:
-    - Bullet normalisation
+    - Bullet normalization
     - Emoji/symbol removal
-    - Smart line breaks
+    - Numbered list normalization
+    - Indentation normalization
     - Paragraph spacing cleanup
-    - Numbered list normalisation
-    - Indentation normalisation
-    - If input contains tables, flatten to text
     """
     if not text:
         return ""
-
-    # If HTML table is present, flatten: remove tags and keep cell text separated by tabs/newlines
+    
+    # Handle HTML tables - flatten to text
     if "<table" in text.lower():
-        # remove styles first
-        flat = re.sub(r'<\/?(table|tbody|thead|tfoot|tr|th|td)[^>]*>', lambda m: "\n" if m.group(0).lower().startswith("</") else "\t", text, flags=re.IGNORECASE)
-        # fallback: strip tags
+        flat = re.sub(r'<\/?(table|tbody|thead|tfoot|tr|th|td)[^>]*>', 
+                     lambda m: "\n" if m.group(0).lower().startswith("</") else "\t", 
+                     text, flags=re.IGNORECASE)
         flat = re.sub(r'<[^>]+>', '', flat)
         flat = unescape(flat)
-        # collapse whitespace
         flat = re.sub(r'[ \t]{2,}', ' ', flat)
         flat = re.sub(r'\n{3,}', '\n\n', flat)
         text = flat.strip()
-
-    # Normalize bullets first (keeps list structure)
+    
+    # Apply transformations
     text = normalize_bullets(text)
-
-    # Remove emojis/decorative symbols (but preserve bullets)
     text = _remove_emojis_and_symbols(text)
-
-    # Normalize numbered lists
     text = _normalize_numbered_lists(text)
-
-    # Smart line breaks
-    text = _smart_linebreaks_text(text)
-
-    # Indentation normalization
     text = _normalize_indentation(text)
-
-    # Cleanup paragraph spacing
     text = _cleanup_paragraph_spacing(text)
-
+    
     return text.strip()
 
 
 def clean_table_mode_output(html_or_text: str) -> str:
     """
     Table mode pipeline:
-    - Accepts HTML or text that contains a table.
-    - Removes inline styles/colors and extraneous attributes.
-    - Ensures 'table grid' design (simple borders) by removing inline CSS.
-    - Normalizes bullets and numbered lists inside cells.
-    - Removes emojis/symbols inside cells.
-    Returns: cleaned HTML (table-only) - if no table detected, returns input (cleaned) as plain text.
+    - Remove inline styles
+    - Normalize bullets and lists inside cells
+    - Remove emojis/symbols
+    Returns: cleaned HTML table
     """
     if not html_or_text:
         return ""
-
-    # If input isn't HTML, attempt to treat as TSV-like or simple rows -> convert to simple table HTML
+    
+    # If no table detected, return cleaned text
     if "<table" not in html_or_text.lower():
-        # try to heuristically convert pipe/tab separated to HTML table
+        # Try to convert pipe/tab separated to table
         lines = [ln for ln in html_or_text.splitlines() if ln.strip()]
         if not lines:
             return ""
-
-        # If looks like rows with tabs or pipes, convert to table
+        
+        # Check for pipe or tab separators
         if any(("|" in ln) or ("\t" in ln) for ln in lines):
             rows = []
             for ln in lines:
-                cells = [c.strip() for c in re.split(r'\t|\s*\|\s*', ln) if c is not None]
+                cells = [c.strip() for c in re.split(r'\t|\s*\|\s*', ln)]
                 rows.append(cells)
-            # Build simple HTML table
+            
+            # Build HTML table
             html = ["<table>"]
             for r in rows:
                 html.append("<tr>")
                 for c in r:
-                    # normalize bullets/numbers inside cell
                     c = normalize_bullets(c)
                     c = _remove_emojis_and_symbols(c)
                     c = _normalize_numbered_lists(c)
@@ -267,75 +509,64 @@ def clean_table_mode_output(html_or_text: str) -> str:
             html.append("</table>")
             result = "\n".join(html)
             return _strip_html_styles(result)
-
-        # If not convertible, fallback: return cleaned plain text
-        cleaned = _remove_emojis_and_symbols(html_or_text)
-        cleaned = normalize_bullets(cleaned)
-        cleaned = _normalize_numbered_lists(cleaned)
-        cleaned = _cleanup_paragraph_spacing(cleaned)
-        return cleaned
-
-    # At this point we have HTML table content
+        
+        # Fallback: return cleaned plain text
+        return clean_text_mode_output(html_or_text)
+    
+    # Process HTML table
     html = html_or_text
-
-    # Remove inline styles and attributes
     html = _strip_html_styles(html)
-
-    # Remove color attributes / font tags
-    html = re.sub(r'<font[^>]*>', '', html, flags=re.IGNORECASE)
-    html = re.sub(r'</font>', '', html, flags=re.IGNORECASE)
-
-    # Normalize bullets inside tags (cells and list items)
     html = _normalize_bullets_in_html(html)
-
-    # Normalize numbered lists inside table cells: convert "1)", "1 -" etc to "1."
-    def _norm_nums_in_cell(match):
-        inner = match.group(1)
+    
+    # Clean cell contents
+    def clean_cell(match):
+        inner = re.sub(r'<[^>]+>', '', match.group(1)).strip()
         inner = _normalize_numbered_lists(inner)
         inner = _remove_emojis_and_symbols(inner)
         return f"<td>{inner}</td>"
-
-    html = re.sub(r'<td[^>]*>(.*?)</td>', lambda m: f"<td>{_remove_emojis_and_symbols(_normalize_numbered_lists(re.sub(r'<[^>]+>', '', m.group(1)).strip()))}</td>", html, flags=re.IGNORECASE|re.DOTALL)
-
-    # Force simple grid style via attributes (styling for display is handled by popup._apply_content_styling)
-    # Ensure table tags are well-formed (collapse multiple spaces)
+    
+    html = re.sub(r'<td[^>]*>(.*?)</td>', clean_cell, html, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Collapse whitespace
     html = re.sub(r'\s+', ' ', html)
-
-    # Finally, return cleaned HTML table
+    
     return html.strip()
 
 
 def clean_math_mode_output(text: str, for_display: bool = True) -> str:
     """
     Math mode pipeline:
-    - Convert LaTeX ($...$, $$...$$) to MathML (using convert_latex_to_mathml)
-    - Use unicode fallback where needed
-    - Enhance MathML display for app
-    - Return HTML-ready string with MathML
+    - Convert LaTeX to MathML
+    - Enhance display styling
+    Returns: HTML with MathML
     """
     if not text:
         return ""
-
-    # Convert LaTeX to MathML (uses latex2mathml if available)
+    
+    # Convert LaTeX to MathML
     converted = convert_latex_to_mathml(text)
-
-    # Remove trailing/leading whitespace
-    converted = converted.strip()
-
-    # Add visual enhancements for display if requested
-    if for_display and "<math" in converted:
+    
+    # Add display enhancements
+    if for_display and '<math' in converted:
         converted = enhance_math_display(converted)
+    
+    return converted.strip()
 
-    return converted
 
+# ===================================================================
+# EXPORTS
+# ===================================================================
 
-# Exported convenience alias names (backward compatibility)
 __all__ = [
-    # existing exports if any...
-    "clean_text_mode_output",
-    "clean_table_mode_output",
-    "clean_math_mode_output",
-    # keep the original helpers too
-    "process_ocr_text_with_math",
-    "prepare_math_for_clipboard",
+    'clean_hindi_text',
+    'normalize_bullets',
+    'convert_latex_to_mathml',
+    'enhance_math_display',
+    'prepare_math_for_clipboard',
+    'process_ocr_text_with_math',
+    'render_latex_to_image',
+    'convert_mathml_to_omml',
+    'clean_text_mode_output',
+    'clean_table_mode_output',
+    'clean_math_mode_output',
 ]
