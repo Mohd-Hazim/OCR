@@ -4,22 +4,87 @@ import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
+# =====================================================================
+# === MERGED CELL NORMALIZER (FINAL, FIXED ROWSPAN + COLSPAN) =========
+# =====================================================================
+from bs4 import BeautifulSoup
 
-# --------------------------------------------------------------------
-# === GEMINI 2.5 PRO - COMPLETE FORMATTED CONTENT EXTRACTOR ==========
-# --------------------------------------------------------------------
+def normalize_merged_cells(html: str) -> str:
+    """
+    Fully robust rowspan/colspan expander.
+    Produces a PERFECT rectangular table:
+        - Top-left cell keeps text
+        - All covered cells become blank
+    """
+
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table")
+
+    for table in tables:
+        rows = table.find_all("tr")
+        occ = {}       # (r,c) → text
+        max_row = 0
+        max_col = 0
+
+        for r, tr in enumerate(rows):
+            cells = tr.find_all(["td", "th"])
+            c = 0
+
+            for cell in cells:
+
+                # find next empty col
+                while (r, c) in occ:
+                    c += 1
+
+                txt = cell.get_text(strip=True)
+
+                try:
+                    rowspan = int(cell.get("rowspan", 1))
+                except:
+                    rowspan = 1
+
+                try:
+                    colspan = int(cell.get("colspan", 1))
+                except:
+                    colspan = 1
+
+                # place text in the main cell
+                occ[(r, c)] = txt
+
+                # fill merged region with blanks
+                for rr in range(r, r + rowspan):
+                    for cc in range(c, c + colspan):
+                        if (rr, cc) not in occ:
+                            # blank for merged
+                            occ[(rr, cc)] = ""  
+                        max_row = max(max_row, rr)
+                        max_col = max(max_col, cc)
+
+                c += colspan
+
+        # Build new normalized table
+        new_table = soup.new_tag("table")
+
+        for r in range(max_row + 1):
+            tr_new = soup.new_tag("tr")
+            for c in range(max_col + 1):
+                td_new = soup.new_tag("td")
+                td_new.string = occ.get((r, c), "")
+                tr_new.append(td_new)
+            new_table.append(tr_new)
+
+        table.replace_with(new_table)
+
+    return str(soup)
+
+
+# =====================================================================
+# === GEMINI 2.5 PRO - COMPLETE FORMATTED CONTENT EXTRACTOR ===========
+# =====================================================================
 def extract_complete_content(pil_image: Image.Image, api_key: str):
     """
-    Extract ALL content from image with PROPER FORMATTING.
-
-    Features:
-    - Preserves bullet points (◆, •, ○, -)
-    - Preserves numbering (1., 2., etc.)
-    - Maintains hierarchical structure
-    - Converts tables to HTML
-    - Preserves Hindi + English text
-    - Maintains original layout flow
-    - Improves readability when needed
+    Extract table EXACTLY with rowspan/colspan from Gemini.
+    Then normalize it to a perfect rectangular table.
     """
 
     if not api_key:
@@ -27,50 +92,42 @@ def extract_complete_content(pil_image: Image.Image, api_key: str):
 
     genai.configure(api_key=api_key)
 
-    # Convert image to base64
+    # Convert image → base64
     buf = io.BytesIO()
     pil_image.save(buf, format="PNG")
     img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    model_name = "gemini-2.5-pro"
-    model = genai.GenerativeModel(model_name, generation_config={"temperature": 0.0})
+    model = genai.GenerativeModel("gemini-2.5-pro",
+                                  generation_config={"temperature": 0.0})
 
-    logger.info("🔹 Running Gemini 2.5 Pro for formatted content extraction")
+    logger.info("🔹 Gemini 2.5 Pro table extraction starting")
 
-    # Enhanced prompt for formatting preservation
-    prompt = """Extract ALL visible content from this image with PROPER FORMATTING.
+    # ------------------------------------------------------------------
+    # *** MOST IMPORTANT PART: STRICT TABLE HTML OUTPUT PROMPT ***
+    # ------------------------------------------------------------------
+    prompt = """
+Extract ONLY the table from the image as STRICT HTML.
 
-CRITICAL FORMATTING RULES:
+RULES YOU MUST FOLLOW:
+1. Output ONLY these tags:
+   <table>, <tr>, <td>, <th> WITH correct rowspan/colspan.
 
-1. **Bullet Points & Lists**:
-   - Preserve ALL bullet symbols: ◆, •, ○, -, ▸, etc.
-   - Maintain indentation levels
-   - Keep numbered lists: 1., 2., 3., etc.
-   - Use HTML lists when appropriate: <ul>, <ol>
+2. Represent merged cells EXACTLY as in the image:
+   - vertically merged → use rowspan="X"
+   - horizontally merged → use colspan="X"
 
-2. **Structure & Hierarchy**:
-   - Preserve headings and titles
-   - Maintain parent-child relationships in lists
-   - Keep proper spacing between sections
-   - Preserve alignment (left, center, right)
+3. DO NOT output plain text.
+   DO NOT output markdown.
+   DO NOT wrap in ```html code fences.
+   DO NOT add explanations.
+   DO NOT add <div>, <p>, <span>, <br>, <style>.
 
-3. **Tables**:
-   - Convert to clean HTML <table> with proper headers
-   - Preserve all rows and columns
-   - Maintain cell alignment
+4. Preserve ALL Hindi + English text exactly.
 
-4. **Text Content**:
-   - Extract EXACT Hindi and English text
-   - Preserve special characters and diacritics
-   - Keep numbers and units together
-   - Maintain date formats
+5. The HTML MUST start with <table> and end with </table>.
 
-5. **Layout Flow**:
-   - Extract content in reading order (top to bottom)
-   - Preserve line breaks
-   - Keep related content grouped
-
-NOW EXTRACT ALL CONTENT WITH PROPER FORMATTING:"""
+Extract the table EXACTLY as seen inside the image.
+"""
 
     try:
         resp = model.generate_content([
@@ -80,26 +137,28 @@ NOW EXTRACT ALL CONTENT WITH PROPER FORMATTING:"""
 
         text = getattr(resp, "text", "").strip()
 
-        # Cleanup markdown fences
+        # Remove accidental markdown formatting
         if text.startswith("```html"):
-            text = text[len("```html"):].strip()
-        elif text.startswith("```"):
+            text = text[7:].strip()
+        if text.startswith("```"):
             text = text[3:].strip()
         if text.endswith("```"):
             text = text[:-3].strip()
 
-        # Post-processing
+        # ------------------------------------------------------------------
+        # STEP 1 — FIRST normalize merged rows/columns
+        # ------------------------------------------------------------------
+        if "<table" in text.lower():
+            text = normalize_merged_cells(text)
+
+        # ------------------------------------------------------------------
+        # STEP 2 — THEN formatting cleanup
+        # ------------------------------------------------------------------
         text = _enhance_formatting(text)
 
         # Logging summary
-        has_bullets = any(symbol in text for symbol in ["◆", "•", "○", "▸", "◾"])
-        has_numbers = any(f"{i}." in text for i in range(1, 10))
-        has_table = "<table" in text.lower()
-        has_list = "<ul>" in text.lower() or "<ol>" in text.lower()
-
         logger.info(
-            f"✅ Extracted: bullets={has_bullets}, numbers={has_numbers}, "
-            f"table={has_table}, html_lists={has_list}, length={len(text)} chars"
+            f"✅ Table Extracted | rows/cols normalized | length={len(text)}"
         )
 
         return text or ""
@@ -109,53 +168,42 @@ NOW EXTRACT ALL CONTENT WITH PROPER FORMATTING:"""
         return ""
 
 
-# --------------------------------------------------------------------
+# =====================================================================
+# === FORMATTING ENHANCER ============================================
+# =====================================================================
 def _enhance_formatting(text: str) -> str:
-    """
-    Post-process extracted text to improve formatting:
-    - spacing around bullets
-    - indentation cleanup
-    - whitespace cleanup
-    """
+    """Basic cleanup after extraction."""
     if not text:
         return text
 
     import re
 
-    lines = text.split('\n')
-    enhanced = []
+    lines = text.split("\n")
+    cleaned = []
 
     for line in lines:
         line = line.strip()
         if not line:
-            enhanced.append('')
+            cleaned.append("")
             continue
 
-        bullet_symbols = ['◆', '•', '○', '▸', '◾', '▪', '–', '—']
-        for symbol in bullet_symbols:
-            if symbol in line:
-                line = re.sub(rf'{symbol}([^\s])', rf'{symbol} \1', line)
+        bullets = ['◆', '•', '○', '▸', '◾', '▪', '–', '—']
+        for b in bullets:
+            line = re.sub(rf"{b}([^\s])", rf"{b} \1", line)
 
-        line = re.sub(r'(\d+\.)([^\s])', r'\1 \2', line)
-        line = re.sub(r'([^\s])–([^\s])', r'\1 – \2', line)
+        line = re.sub(r"(\d+\.)([^\s])", r"\1 \2", line)
+        line = re.sub(r"([^\s])–([^\s])", r"\1 – \2", line)
 
-        enhanced.append(line)
+        cleaned.append(line)
 
-    result = '\n'.join(enhanced)
-
-    if '<table' not in result and '<ul>' not in result:
-        result = re.sub(r'\n([^◆•○▸◾\d<\s])', r'\n\n\1', result)
-
-    result = re.sub(r'\n{3,}', '\n\n', result)
+    result = "\n".join(cleaned)
+    result = re.sub(r"\n{3,}", "\n\n", result)
 
     return result.strip()
 
 
-# --------------------------------------------------------------------
-# BACKWARD COMPATIBILITY ALIAS
-# --------------------------------------------------------------------
+# =====================================================================
+# BACKWARD COMPATIBILITY
+# =====================================================================
 def extract_table_text(pil_image: Image.Image, api_key: str):
-    """
-    Legacy function name - still returns gemini-pro content.
-    """
     return extract_complete_content(pil_image, api_key)
