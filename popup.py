@@ -30,6 +30,7 @@ from PySide6.QtCore import QEventLoop
 
 from gui.resizable_box import ResizableBox, ResizeHandle
 from utils.layout_persistence import LayoutManager
+from PySide6.QtGui import QCursor
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -302,6 +303,12 @@ class ToggleSwitch(QWidget):
         p.end()
 # ---------------- Main Popup ----------------
 class PopupWindow(QWidget):
+    from PySide6.QtCore import Signal
+
+    trigger_text = Signal()
+    trigger_table = Signal()
+    trigger_popup = Signal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Teaching Pariksha")
@@ -349,9 +356,154 @@ class PopupWindow(QWidget):
         self._setup_tray()
         self._init_copied_label()
         self._init_loaders()
+        from gui.mode_selector import ModeSelector
+        self.mode_popup = ModeSelector()
+        self.mode_popup.mode_selected.connect(self._on_mode_chosen)
+        # no cancelled signal, so don't connect anything
+
+        self._init_shortcuts()
+        self.installEventFilter(self)
+        self._start_hotkey_listener()
+        self._tray_menu_open = False
+        self._ignore_tray_click_until = 0
+
+        self.shortcut_override_mode = None
+
+        self.trigger_text.connect(lambda: self._start_capture_mode("text"))
+        self.trigger_table.connect(lambda: self._start_capture_mode("table"))
+        self.trigger_popup.connect(self.show_main_window)
 
         from core.capture import initialize_capture_debug
         initialize_capture_debug()
+    
+    def show_main_window(self):
+        """Show the main GUI when the 'popup' hotkey is pressed."""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+    # ===============================================================
+    #  MULTI-KEY CHORD SHORTCUTS (Alt+T+1, Alt+T+2, Alt+T+P)
+    # ===============================================================
+    def _init_shortcuts(self):
+        self._key_buffer = []
+        self._key_timer = QTimer(self)
+        self._key_timer.setInterval(600)   # 0.6 seconds to complete the combo
+        self._key_timer.setSingleShot(True)
+        self._key_timer.timeout.connect(self._clear_key_buffer)
+        
+    def _begin_record_shortcut(self, box, key_name):
+        box.setText("Recording…")
+        box.recording = True
+        box.key_name = key_name
+
+    def _finish_record_shortcut(self, box, final_text):
+        box.setText(final_text)
+        box.recording = False
+        self.config[box.key_name] = final_text
+        save_config(self.config)
+
+    def _clear_key_buffer(self):
+        self._key_buffer.clear()
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent
+        # ---------------- SHORTCUT RECORDING ----------------
+        for box in [self.shortcut_text_box, self.shortcut_table_box, self.shortcut_popup_box]:
+            if hasattr(box, "recording") and box.recording:
+                if event.type() == QEvent.KeyPress:
+                    mods = []
+                    if event.modifiers() & Qt.ControlModifier: mods.append("ctrl")
+                    if event.modifiers() & Qt.ShiftModifier: mods.append("shift")
+                    if event.modifiers() & Qt.AltModifier: mods.append("alt")
+
+                    key = event.text().lower()
+                    if not key:
+                        return True
+
+                    parts = mods + [key]
+                    hotkey = "+".join(parts)
+
+                    self._finish_record_shortcut(box, hotkey)
+                    return True
+
+        if isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
+
+            # detect modifier
+            mods = event.modifiers()
+            if mods & Qt.AltModifier:
+
+                ch = event.text().lower()
+
+                if ch:
+                    self._key_buffer.append(ch)
+                    self._key_timer.start()
+
+                    # -------- Load shortcuts from config --------
+                    text_sc = self.config.get("shortcut_text", "alt+t+1").split("+")
+                    table_sc = self.config.get("shortcut_table", "alt+t+2").split("+")
+                    popup_sc = self.config.get("shortcut_popup", "alt+t+p").split("+")
+
+                    # Remove "alt" because eventFilter already matched ALT
+                    text_keys = text_sc[1:]
+                    table_keys = table_sc[1:]
+                    popup_keys = popup_sc[1:]
+
+                    # -------- Match keys for TEXT mode --------
+                    if self._key_buffer == text_keys:
+                        self._clear_key_buffer()
+                        self._start_capture_mode("text")
+                        return True
+
+                    # -------- Match keys for TABLE mode --------
+                    if self._key_buffer == table_keys:
+                        self._clear_key_buffer()
+                        self._start_capture_mode("table")
+                        return True
+
+                    # -------- Match keys for POPUP --------
+                    if self._key_buffer == popup_keys:
+                        self._clear_key_buffer()
+                        self._show_left_click_menu()
+                        return True
+
+        return super().eventFilter(obj, event)
+
+    def _on_mode_chosen(self, mode):
+        """Handle mode (Text/Table) selection from ModeSelector."""
+        self.selected_content_mode = mode
+        self.start_capture()
+        
+    def _show_left_click_menu(self):
+        import time
+        self._tray_menu_open = True
+
+        menu = QMenu()
+
+        text_action = QAction("Text", self)
+        table_action = QAction("Table", self)
+        cancel_action = QAction("Cancel", self)
+
+        text_action.triggered.connect(lambda: self._start_capture_mode("text"))
+        table_action.triggered.connect(lambda: self._start_capture_mode("table"))
+        cancel_action.triggered.connect(lambda: None)
+
+        menu.addAction(text_action)
+        menu.addAction(table_action)
+        menu.addSeparator()
+        menu.addAction(cancel_action)
+
+        # When menu closes → delay tray acceptance for 200ms
+        def _on_close():
+            self._tray_menu_open = False
+            self._ignore_tray_click_until = time.time() + 0.25
+
+        menu.aboutToHide.connect(_on_close)
+
+        menu.exec(QCursor.pos())
+
     def _reset_layout_sizes(self):
         """Reset all sizes to defaults."""
         # Reset window size
@@ -690,7 +842,7 @@ class PopupWindow(QWidget):
         header_layout.addStretch(1)
         # --- Content Type Dropdown ---
         self.mode_dropdown = QComboBox()
-        self.mode_dropdown.addItems(["Text", "Tables", "Maths Equations"])
+        self.mode_dropdown.addItems(["Text", "Tables"])
         self.mode_dropdown.setFixedHeight(32)
         self.mode_dropdown.setMinimumWidth(150)
         self.mode_dropdown.setCursor(Qt.PointingHandCursor)
@@ -707,9 +859,6 @@ class PopupWindow(QWidget):
             elif mode == "Tables":
                 self.selected_content_mode = "table"
                 logger.info("Capture mode: TABLE")
-            elif mode == "Maths Equations":
-                self.selected_content_mode = "math"
-                logger.info("Capture mode: MATH")
             
             # Show brief feedback
             self.status_label.setText(f"Mode: {self.selected_content_mode.title()}")
@@ -753,8 +902,16 @@ class PopupWindow(QWidget):
         root.addWidget(self._with_card(self.preview_box))
 
         # --- Extracted Text ---
-        root.addWidget(self._section_label("Extracted Text"))
-        self.extracted_frame, self.extracted_box = self._textbox_with_copy()
+        self.extracted_frame, self.extracted_box, ex_copy_btn = self._textbox_with_copy()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Extracted Text"))
+        row.addStretch()
+        row.addWidget(ex_copy_btn)
+
+        root.addLayout(row)
+        root.addWidget(self.extracted_frame)
+
         self.extracted_box.setMinimumHeight(100)
         self.extracted_box.setMaximumHeight(500)
 
@@ -839,16 +996,42 @@ class PopupWindow(QWidget):
         root.addWidget(translate_container)
         root.addLayout(row)
 
-        # --- Translated Text ---
+       # --- Translated Text (hidden until Translate) ---
+
+        # Label (stored for theme update, but NOT added to layout directly)
         self.translated_label = self._section_label("Translated Text")
         self.translated_label.setVisible(False)
-        root.addWidget(self.translated_label)
 
-        self.translated_frame, self.translated_box = self._textbox_with_copy()
+        # Build textbox + copy button
+        self.translated_frame, self.translated_box, tr_copy_btn = self._textbox_with_copy()
+
+        # Row with label + copy button (this is the ONLY visible row)
+        self.tr_row = QHBoxLayout()
+        self.tr_label = QLabel("Translated Text")
+        self.tr_label.setObjectName("sectionLabel")
+
+        self.tr_row.addWidget(self.tr_label)
+        self.tr_row.addStretch()
+        self.tr_row.addWidget(tr_copy_btn)
+
+        # Add row to layout
+        root.addLayout(self.tr_row)
+
+        # Hide entire section until translation
+        self.tr_label.setVisible(False)
+        tr_copy_btn.setVisible(False)
+        self.translated_frame.setVisible(False)
+
+        # Add the translated text frame
+        root.addWidget(self.translated_frame)
+
+        # Box sizing & scrollbars
         self.translated_box.setMinimumHeight(100)
         self.translated_box.setMaximumHeight(500)
         self.translated_box.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.translated_box.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+        # Resizable container (initially hidden)
         saved_translated_height = LayoutManager.get_translated_height()
         self.translated_resizable = ResizableBox(
             self.translated_frame,
@@ -860,15 +1043,18 @@ class PopupWindow(QWidget):
         self.translated_resizable.setVisible(False)
         root.addWidget(self.translated_resizable)
 
+        # Save reference for theme refresh
+        self.copy_translated_btn = tr_copy_btn
+
+        # Status label
         self.status_label = QLabel("")
         self.status_label.setObjectName("status")
         self.status_label.setVisible(False)
         root.addWidget(self.status_label)
 
         # --- Overlay + Lang Sync ---
-        # Create overlay as a top-level window, but keep a back-reference
-        self.overlay = SelectionOverlay(None)   # IMPORTANT: pass None so overlay is top-level
-        self.overlay.parent_window = self       # keep callback reference for selection events
+        self.overlay = SelectionOverlay(None)
+        self.overlay.parent_window = self
         self._restore_last_langs()
         self.trans_lang.currentIndexChanged.connect(self._save_langs)
         
@@ -1070,6 +1256,39 @@ class PopupWindow(QWidget):
         reset_layout_btn.clicked.connect(self._reset_layout_sizes)
         layout.addWidget(reset_layout_btn)
         layout.addLayout(btn_row)
+        
+        # ------------------ SHORTCUT SETTINGS ------------------
+        layout.addWidget(QLabel("Shortcut Keys"))
+
+        from PySide6.QtWidgets import QLineEdit
+
+        # Text Capture Shortcut
+        self.shortcut_text_box = QLineEdit()
+        self.shortcut_text_box.setPlaceholderText("Press keys…")
+        self.shortcut_text_box.setReadOnly(True)
+        self.shortcut_text_box.setText(self.config.get("shortcut_text", "alt+t+1"))
+        layout.addWidget(QLabel("Text Capture"))
+        layout.addWidget(self.shortcut_text_box)
+
+        # Table Capture Shortcut
+        self.shortcut_table_box = QLineEdit()
+        self.shortcut_table_box.setPlaceholderText("Press keys…")
+        self.shortcut_table_box.setReadOnly(True)
+        self.shortcut_table_box.setText(self.config.get("shortcut_table", "alt+t+2"))
+        layout.addWidget(QLabel("Table Capture"))
+        layout.addWidget(self.shortcut_table_box)
+
+        # Popup Shortcut
+        self.shortcut_popup_box = QLineEdit()
+        self.shortcut_popup_box.setPlaceholderText("Press keys…")
+        self.shortcut_popup_box.setReadOnly(True)
+        self.shortcut_popup_box.setText(self.config.get("shortcut_popup", "alt+t+p"))
+        layout.addWidget(QLabel("Mode Popup"))
+        layout.addWidget(self.shortcut_popup_box)
+
+        self.shortcut_text_box.mousePressEvent = lambda e: self._begin_record_shortcut(self.shortcut_text_box, "shortcut_text")
+        self.shortcut_table_box.mousePressEvent = lambda e: self._begin_record_shortcut(self.shortcut_table_box, "shortcut_table")
+        self.shortcut_popup_box.mousePressEvent = lambda e: self._begin_record_shortcut(self.shortcut_popup_box, "shortcut_popup")
 
     def _on_active_key_changed(self, key):
         """Update the currently active Gemini API key."""
@@ -1329,13 +1548,12 @@ class PopupWindow(QWidget):
 
 
         
-    # ---------- unified text card ----------
+    # ---------- unified text card ---------
     def _textbox_with_copy(self):
-        """Create textbox with math-aware copy button."""
+        """Create textbox with enhanced table-aware copy button."""
         frame = QFrame()
         frame.setObjectName("textCard")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
 
         box = QTextEdit()
@@ -1345,15 +1563,12 @@ class PopupWindow(QWidget):
         box.customContextMenuRequested.connect(lambda _: None)
         layout.addWidget(box)
 
-        # reserve space for copy button
-        box.setViewportMargins(0, 0, 48, 0)   # 👈 48px right margin inside QtextEdit viewport
-
         # Copy button
         copy_btn = QPushButton(frame)
         copy_btn.setFixedHeight(22)
         copy_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         copy_btn.setCursor(Qt.PointingHandCursor)
-        copy_btn.setToolTip("Copy text to clipboard")
+        copy_btn.setToolTip("Copy to clipboard (with table grid borders)")
 
         icon_path = COPY_ICON_DARK if self.current_theme == "dark" else COPY_ICON_LIGHT
         copy_btn.setIcon(QIcon(os.path.abspath(icon_path)))
@@ -1375,52 +1590,52 @@ class PopupWindow(QWidget):
                 background-color: rgba(62,156,246,0.15);
             }}
         """)
-        
-        # prevent text from going under the copy button
-        box.setViewportMargins(0, 0, 48, 0)
 
-        # Position button
-        def reposition():
-            copy_btn.move(frame.width() - copy_btn.width() - 10, 8)
-        frame.resizeEvent = lambda e: (reposition(), QFrame.resizeEvent(frame, e))
-        reposition()
+        # ❌ REMOVED absolute positioning
 
-        # ENHANCED COPY ACTION WITH MATH SUPPORT
+        # ENHANCED COPY ACTION WITH TABLE GRID SUPPORT
         def copy_action():
             from PySide6.QtCore import QMimeData
-            from core.postprocess import prepare_math_for_clipboard
+            from core.postprocess import prepare_content_for_clipboard, extract_text_and_tables
             
             mime = QMimeData()
             
-            # Get HTML (with MathML) and plain text
+            # Get current content
             html = getattr(self, "_last_full_html", box.toHtml().strip())
             text = box.toPlainText().strip()
             
-            if text:
-                # Prepare HTML with proper MathML for Word
-                html = prepare_math_for_clipboard(html)
+            if not text:
+                logger.info("No content to copy")
+                return
+            
+            # Check if we have tables
+            if '<table' in html.lower():
+                enhanced_html = prepare_content_for_clipboard(html)
+                structure = extract_text_and_tables(html)
+                logger.info(f"Copying content with {len(structure['tables'])} table(s) - Table Grid format")
                 
-                # Ensure MathML tags aren't HTML-escaped
+                mime.setHtml(enhanced_html)
+                mime.setText(text)
+                
+                logger.info("✅ Table copied with Table Grid style (white background, dark borders)")
+                
+            else:
+                from core.postprocess import prepare_math_for_clipboard
+                html = prepare_math_for_clipboard(html)
                 html = html.replace("&lt;math", "<math")
                 html = html.replace("&lt;/math&gt;", "</math>")
                 html = html.replace("&lt;", "<").replace("&gt;", ">")
                 
-                # Set both formats for maximum compatibility
                 mime.setHtml(html)
                 mime.setText(text)
-                
-                # Add Office-specific format for better Word compatibility
-                # This tells Word to preserve the MathML
-                mime.setData("application/x-qt-windows-mime;value=\"Office Drawing Shape\"", b"")
-                
-                QApplication.clipboard().setMimeData(mime)
-                
-                # Visual feedback
-                pos_global = copy_btn.mapToGlobal(copy_btn.rect().center())
-                pos_local = self.mapFromGlobal(pos_global)
-                self._show_copied(pos_local)
-                
-                logger.info("Copied content with MathML to clipboard")
+            
+            QApplication.clipboard().setMimeData(mime)
+            
+            pos_global = copy_btn.mapToGlobal(copy_btn.rect().center())
+            pos_local = self.mapFromGlobal(pos_global)
+            self._show_copied(pos_local)
+            
+            logger.info("✅ Content copied to clipboard with grid formatting")
 
         copy_btn.clicked.connect(copy_action)
 
@@ -1430,21 +1645,185 @@ class PopupWindow(QWidget):
         elif not hasattr(self, "copy_translated_btn"):
             self.copy_translated_btn = copy_btn
 
-        return frame, box
+        # NEW → return button separately
+        return frame, box, copy_btn
 
-
-    def _copy_action(self, box, btn):
+    # ADD this helper method to the PopupWindow class
+    def _html_to_rtf(self, html: str) -> str:
+        """
+        Convert HTML to RTF format for better Word compatibility.
+        This is a simplified converter for tables.
+        """
+        from bs4 import BeautifulSoup
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # RTF header
+            rtf = r"{\rtf1\ansi\deff0"
+            rtf += r"{\fonttbl{\f0\fnil\fcharset0 Calibri;}}"
+            rtf += r"\viewkind4\uc1\pard\f0\fs22 "
+            
+            # Process tables
+            for table in soup.find_all('table'):
+                rtf += r"\par\trowd\trgaph70"
+                
+                # Get column count from first row
+                first_row = table.find('tr')
+                if first_row:
+                    col_count = len(first_row.find_all(['td', 'th']))
+                    
+                    # Define cell widths
+                    cell_width = 2000  # Twips
+                    for i in range(col_count):
+                        rtf += f"\\cellx{(i+1) * cell_width}"
+                    
+                    # Process rows
+                    for row in table.find_all('tr'):
+                        for cell in row.find_all(['td', 'th']):
+                            cell_text = cell.get_text(strip=True)
+                            rtf += f" {cell_text}\\cell"
+                        rtf += "\\row\\trowd\\trgaph70"
+                        for i in range(col_count):
+                            rtf += f"\\cellx{(i+1) * cell_width}"
+            
+            # Process text outside tables
+            for p in soup.find_all('p'):
+                text = p.get_text(strip=True)
+                if text:
+                    rtf += f"\\par {text}"
+            
+            rtf += r"\par}"
+            
+            return rtf
+            
+        except Exception as e:
+            logger.warning(f"RTF conversion failed: {e}")
+            return ""
+    
+    # ADD this helper method to the PopupWindow class
+    def _html_to_rtf(self, html: str) -> str:
+        """
+        Convert HTML to RTF format for better Word compatibility.
+        This is a simplified converter for tables.
+        """
+        from bs4 import BeautifulSoup
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # RTF header
+            rtf = r"{\rtf1\ansi\deff0"
+            rtf += r"{\fonttbl{\f0\fnil\fcharset0 Calibri;}}"
+            rtf += r"\viewkind4\uc1\pard\f0\fs22 "
+            
+            # Process tables
+            for table in soup.find_all('table'):
+                rtf += r"\par\trowd\trgaph70"
+                
+                # Get column count from first row
+                first_row = table.find('tr')
+                if first_row:
+                    col_count = len(first_row.find_all(['td', 'th']))
+                    
+                    # Define cell widths
+                    cell_width = 2000  # Twips
+                    for i in range(col_count):
+                        rtf += f"\\cellx{(i+1) * cell_width}"
+                    
+                    # Process rows
+                    for row in table.find_all('tr'):
+                        for cell in row.find_all(['td', 'th']):
+                            cell_text = cell.get_text(strip=True)
+                            rtf += f" {cell_text}\\cell"
+                        rtf += "\\row\\trowd\\trgaph70"
+                        for i in range(col_count):
+                            rtf += f"\\cellx{(i+1) * cell_width}"
+            
+            # Process text outside tables
+            for p in soup.find_all('p'):
+                text = p.get_text(strip=True)
+                if text:
+                    rtf += f"\\par {text}"
+            
+            rtf += r"\par}"
+            
+            return rtf
+            
+        except Exception as e:
+            logger.warning(f"RTF conversion failed: {e}")
+            return ""
+        
+    def copy_action():
+        from PySide6.QtCore import QMimeData
+        from core.postprocess import prepare_content_for_clipboard, extract_text_and_tables
+        
+        mime = QMimeData()
+        
+        # Get ORIGINAL HTML (without theme styling)
+        original_html = getattr(self, "_last_full_html", "")
+        
+        # Fallback to box HTML if no stored version
+        if not original_html:
+            original_html = box.toHtml().strip()
+        
         text = box.toPlainText().strip()
-        if text:
-            QApplication.clipboard().setText(text)
-            pos_global = btn.mapToGlobal(btn.rect().center())
-            pos_local = self.mapFromGlobal(pos_global)
-            self._show_copied(pos_local)
+        
+        if not text:
+            logger.info("No content to copy")
+            return
+        
+        # Check if we have tables
+        if '<table' in original_html.lower():
+            # Convert to Table Grid format (pure white, dark borders)
+            # This REMOVES all theme colors and applies Word-compatible styling
+            enhanced_html = prepare_content_for_clipboard(original_html)
+            
+            # Extract structure for logging
+            structure = extract_text_and_tables(original_html)
+            logger.info(f"📋 Copying {len(structure['tables'])} table(s) in Table Grid format")
+            
+            # Set clipboard data
+            mime.setHtml(enhanced_html)
+            mime.setText(text)
+            
+            logger.info("✅ Table copied: White background, dark borders, no theme colors")
+            
+        else:
+            # Plain text or text with math
+            from core.postprocess import prepare_math_for_clipboard
+            html = prepare_math_for_clipboard(original_html)
+            
+            html = html.replace("&lt;math", "<math")
+            html = html.replace("&lt;/math&gt;", "</math>")
+            html = html.replace("&lt;", "<").replace("&gt;", ">")
+            
+            mime.setHtml(html)
+            mime.setText(text)
+        
+        # Copy to clipboard
+        QApplication.clipboard().setMimeData(mime)
+        
+        # Visual feedback
+        pos_global = copy_btn.mapToGlobal(copy_btn.rect().center())
+        pos_local = self.mapFromGlobal(pos_global)
+        self._show_copied(pos_local)
 
     def _section_label(self, text):
         lbl = QLabel(text)
         lbl.setObjectName("sectionLabel")
         return lbl
+
+    def _section_row(self, text, copy_btn):
+        row = QHBoxLayout()
+        label = QLabel(text)
+        label.setObjectName("sectionLabel")
+        
+        row.addWidget(label)
+        row.addStretch()
+        row.addWidget(copy_btn)
+
+        return row
 
     def _with_card(self, widget):
         frame = QFrame()
@@ -1973,24 +2352,41 @@ class PopupWindow(QWidget):
 
     # ---------- OCR flow ----------
     def start_capture(self):
+        """Show overlay with integrated mode dropdown."""
         self.hide()
+        if self.shortcut_override_mode:
+            # Shortcuts override overlay mode completely
+            mode = self.shortcut_override_mode
+            self.overlay.selected_mode = mode
+            self.overlay.mode_dropdown.setCurrentText("Text" if mode=="text" else "Table")
+            self.overlay.control_bar.hide()       # ❗ hide UI bar when shortcut is used
+        else:
+            # Normal behavior — show overlay + dropdown
+            self.overlay.selected_mode = self.selected_content_mode
+            self.overlay.control_bar.show()
+
         self.overlay.showFullDesktop()
+
+        
+        logger.info("Mode selector shown - waiting for user choice")
 
     # Replace the on_selection_made method in popup.py with this DEBUG version:
 
     def on_selection_made(self, rect):
-        """
-        Handle selection from overlay - DEBUG VERSION
-        """
+        """Handle selection from overlay."""
+        self.shortcut_override_mode = None
         print("\n" + "=" * 80)
         print("OVERLAY SELECTION RECEIVED")
         print("=" * 80)
         print(f"QRect object: {rect}")
         print(f"  x={rect.x()}, y={rect.y()}")
         print(f"  width={rect.width()}, height={rect.height()}")
-        print(f"  center=({rect.center().x()}, {rect.center().y()})")
         
-        # Check which screen Qt thinks this is on
+        # ✅ GET MODE FROM OVERLAY (not from separate popup)
+        if hasattr(self.overlay, 'selected_mode'):
+            self.selected_content_mode = self.overlay.selected_mode
+            logger.info(f"Using mode from overlay: {self.selected_content_mode}")
+        
         from PySide6.QtGui import QGuiApplication
         screen = QGuiApplication.screenAt(rect.center())
         if screen:
@@ -2004,19 +2400,16 @@ class PopupWindow(QWidget):
         else:
             print(f"  ⚠️  Qt could not determine screen!")
         
-        # Use coordinates AS-IS (no DPR multiplication)
-        # Convert Qt logical → physical for MSS/Windows
         dpr = screen.devicePixelRatio()
-
         x = int(rect.x() * dpr)
         y = int(rect.y() * dpr)
         w = int(rect.width() * dpr)
         h = int(rect.height() * dpr)
 
         print(f"\nPassing to capture: ({x}, {y}) {w}x{h}")
+        print(f"Mode: {self.selected_content_mode.upper()}")
         print("=" * 80 + "\n")
         
-        # Delay slightly to allow overlay to hide smoothly
         QTimer.singleShot(120, lambda: self._do_capture_and_ocr(x, y, w, h))
 
     def _do_capture_and_ocr(self, x, y, w, h):
@@ -2087,9 +2480,6 @@ class PopupWindow(QWidget):
         elif self.selected_content_mode == "table":
             layout_type = "table"
             override_model = True  # Use Gemini Pro for tables
-        elif self.selected_content_mode == "math":
-            layout_type = "math"
-            override_model = False
         else:
             layout_type = "text"
             override_model = False
@@ -2236,7 +2626,11 @@ class PopupWindow(QWidget):
         """Handle translation completion - hide loader BEFORE showing text."""
         # Hide loader
         self._hide_loader(self.loader_translated, delay_ms=0)
-        
+        self.tr_label.setVisible(True)
+        self.copy_translated_btn.setVisible(True)
+        self.translated_frame.setVisible(True)
+        self.translated_resizable.setVisible(True)
+
         # Wait for hide, then show text
         QTimer.singleShot(150, lambda: self._display_translation(translated))
 
@@ -2248,6 +2642,10 @@ class PopupWindow(QWidget):
 
         effect = QGraphicsOpacityEffect(self.translated_resizable)
         self.translated_resizable.setGraphicsEffect(effect)
+        self.tr_label.setVisible(True)
+        self.copy_translated_btn.setVisible(True)
+        self.translated_frame.setVisible(True)
+        self.translated_resizable.setVisible(True)
 
         anim = make_anim(effect, b"opacity", 0.0, 1.0, dur=ANIM_NORMAL, curve=EASE_SOFT)
         anim.start()
@@ -2289,57 +2687,38 @@ class PopupWindow(QWidget):
             self.status_label.setText("⚠️ Render error, showing raw text")
             
     def _render_formatted_content(self, text: str):
-        """
-        Render extracted content with proper formatting and math support.
-        
-        Handles:
-        - LaTeX → MathML conversion
-        - HTML content (tables, lists)
-        - Plain text with bullet points
-        - Mathematical formulas (inline and display)
-        """
-        from core.postprocess import process_ocr_text_with_math, prepare_math_for_clipboard
+        """Render with theme-aware display but store raw HTML for copying."""
+        from core.postprocess import process_ocr_text_with_math
         
         if not text:
             self.extracted_box.setPlainText("")
             return
         
-        # Handle dict results from math mode (with images/OMML)
+        # Handle dict results
         if isinstance(text, dict):
             text = text.get("text", "")
-            # TODO: Handle math_images and math_omml if needed
         
-        # Step 1: Process math formulas
+        # Process math formulas
         text = process_ocr_text_with_math(text, for_display=True)
         
-        # Step 2: Check content type
+        # Check content type
         has_html = any(tag in text.lower() for tag in ['<table', '<ul>', '<ol>', '<li>', '<math'])
         
         if has_html:
-            # Render as HTML with math support
+            # Apply theme styling FOR DISPLAY ONLY
             styled_html = self._apply_content_styling(text)
+            self.extracted_box.setHtml(styled_html)
             
-            # For display: Show placeholder for complex math
-            import re
-            display_html = re.sub(
-                r'<math[^>]*>(.*?)</math>',
-                lambda m: self._create_math_placeholder(m.group(0)),
-                styled_html,
-                flags=re.DOTALL
-            )
+            # Store RAW HTML (without theme) for clipboard
+            self._last_full_html = text  # ← CRITICAL: Store original, not styled_html
             
-            self.extracted_box.setHtml(display_html)
-            
-            # Store original with full MathML for clipboard
-            self._last_full_html = prepare_math_for_clipboard(styled_html)
-            
-            logger.info("Rendered content with math formulas")
+            logger.info("✅ Rendered content with visible table borders")
         else:
             # Plain text path
             formatted_text = self._smart_format_text(text)
             html_content = self._plain_text_to_html(formatted_text)
             self.extracted_box.setHtml(html_content)
-            self._last_full_html = prepare_math_for_clipboard(html_content)
+            self._last_full_html = html_content
             
             logger.info("Rendered plain text with formatting")
             
@@ -2391,31 +2770,36 @@ class PopupWindow(QWidget):
         if hasattr(self, "translated_box"):
             self.translated_box.setStyleSheet(qss)
 
+        if hasattr(self, 'mode_popup'):
+            self.mode_popup.update_theme(theme)
+            logger.debug(f"Mode selector theme updated to: {theme}")
+    
     def _apply_content_styling(self, html_content: str) -> str:
         """
-        Add CSS styling to HTML content for better rendering.
+        Add CSS styling to HTML content for better rendering IN THE APP.
         
         Features:
-        - Proper table styling
+        - Proper table styling with VISIBLE BORDERS
         - List formatting
         - Hindi font support
         - Consistent spacing
+        - Theme-aware colors for APP DISPLAY only
         """
-        # Determine theme colors
+        # Determine theme colors FOR APP DISPLAY
         if self.current_theme == "dark":
             bg_color = "#1E293B"
             text_color = "#E2E8F0"
-            border_color = "#475569"
+            border_color = "#64748B"  # Visible gray border
             header_bg = "#334155"
             row_hover = "#293548"
         else:
             bg_color = "#FFFFFF"
             text_color = "#0F172A"
-            border_color = "#CBD5E1"
+            border_color = "#94A3B8"  # Visible gray border
             header_bg = "#F1F5F9"
             row_hover = "#F8FAFC"
         
-        # Build styled HTML with embedded CSS
+        # Build styled HTML with embedded CSS FOR APP DISPLAY
         styled = f"""
         <html>
         <head>
@@ -2431,17 +2815,17 @@ class PopupWindow(QWidget):
                     padding: 8px 90px 8px 8px;   /* top | right | bottom | left */
                 }}
                 
-                /* Table Styling */
-                table {{
+                /* Table Styling - VISIBLE BORDERS IN APP */
+               table {{
                     border-collapse: collapse;
                     width: 100%;
                     margin: 12px 0;
-                    border: 1px solid {border_color};
+                    border: 1px solid {border_color};    /* thinner outer border */
                     background: {bg_color};
                 }}
-                
+
                 th, td {{
-                    border: 1px solid {border_color};
+                    border: 0.7px solid {border_color};  /* thinner cell borders */
                     padding: 8px 10px;
                     text-align: left;
                     vertical-align: top;
@@ -2510,6 +2894,56 @@ class PopupWindow(QWidget):
         
         return styled
 
+
+    def _render_formatted_content(self, text: str):
+        """
+        Render extracted content with proper formatting and math support.
+        
+        Handles:
+        - LaTeX → MathML conversion
+        - HTML content (tables, lists)
+        - Plain text with bullet points
+        - Mathematical formulas (inline and display)
+        - Tables with VISIBLE BORDERS in app
+        """
+        from core.postprocess import process_ocr_text_with_math, prepare_math_for_clipboard
+        
+        if not text:
+            self.extracted_box.setPlainText("")
+            return
+        
+        # Handle dict results from math mode (with images/OMML)
+        if isinstance(text, dict):
+            text = text.get("text", "")
+        
+        # Step 1: Process math formulas
+        text = process_ocr_text_with_math(text, for_display=True)
+        
+        # Step 2: Check content type
+        has_html = any(tag in text.lower() for tag in ['<table', '<ul>', '<ol>', '<li>', '<math'])
+        
+        if has_html:
+            # Render as HTML with math support
+            # Apply theme-specific styling for APP DISPLAY
+            styled_html = self._apply_content_styling(text)
+            
+            # For display in app: Show with theme colors
+            display_html = styled_html
+            
+            self.extracted_box.setHtml(display_html)
+            
+            # Store ORIGINAL HTML for clipboard (will be converted to Table Grid on copy)
+            self._last_full_html = text  # Store raw HTML without theme styling
+            
+            logger.info("✅ Rendered content with visible table borders")
+        else:
+            # Plain text path
+            formatted_text = self._smart_format_text(text)
+            html_content = self._plain_text_to_html(formatted_text)
+            self.extracted_box.setHtml(html_content)
+            self._last_full_html = html_content
+            
+            logger.info("Rendered plain text with formatting")
 
     def _plain_text_to_html(self, text: str) -> str:
         """
@@ -2718,10 +3152,20 @@ class PopupWindow(QWidget):
         self.tray.show()
 
     def _on_tray_click(self, reason):
-        """Left click should trigger capture directly."""
+        import time
         from PySide6.QtWidgets import QSystemTrayIcon
-        if reason == QSystemTrayIcon.Trigger:  # single left click
-            self.start_capture()
+
+        # Ignore tray activations triggered right after menu close
+        if time.time() < self._ignore_tray_click_until:
+            return
+
+        if self._tray_menu_open:
+            return
+
+        if reason == QSystemTrayIcon.Trigger:
+            self._show_left_click_menu()
+
+
 
     def closeEvent(self, e):
         e.ignore()
@@ -2809,7 +3253,66 @@ class PopupWindow(QWidget):
             return
         
         super().keyPressEvent(event)
+        
+    # ===============================================================
+    # IN-APP BACKGROUND HOTKEY LISTENER (works in tray mode)
+    # ===============================================================
+    def _start_hotkey_listener(self):
+        import keyboard
+        import threading
+
+        if hasattr(self, "_hotkey_thread"):
+            return
+
+        def listener():
+            buffer = []
+
+            while True:
+                event = keyboard.read_event()
+
+                if event.event_type != "down":
+                    continue
+
+                key = event.name.lower()
+
+                # Handle Alt separately
+                if key == "alt":
+                    buffer = []
+                    continue
+
+                buffer.append(key)
+
+                if len(buffer) > 3:
+                    buffer = []
+
+                # ----- LOAD USER SHORTCUTS -----
+                shortcut_text  = self.config.get("shortcut_text",  "alt+t+1").split("+")
+                shortcut_table = self.config.get("shortcut_table", "alt+t+2").split("+")
+                shortcut_popup = self.config.get("shortcut_popup", "alt+t+p").split("+")
+
+                # ----- MATCH USER SHORTCUTS -----
+                if buffer == shortcut_text:
+                    buffer = []
+                    self.trigger_text.emit()
+
+                if buffer == shortcut_table:
+                    buffer = []
+                    self.trigger_table.emit()
+
+                if buffer == shortcut_popup:
+                    buffer = []
+                    self.trigger_popup.emit()
+
+        self._hotkey_thread = threading.Thread(target=listener, daemon=True)
+        self._hotkey_thread.start()
+
     
+    def _start_capture_mode(self, mode: str):
+        self.shortcut_override_mode = mode
+        self.selected_content_mode = mode   # ensure both are set
+        self._set_capture_mode(mode)
+        self.start_capture()
+
 def run_app():
     from PySide6.QtCore import Qt, QCoreApplication, QTimer
     from PySide6.QtWidgets import QApplication

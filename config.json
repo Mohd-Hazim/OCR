@@ -2,20 +2,21 @@
     "window_width": 520,
     "window_height": 620,
     "preview_height": 250,
-    "extracted_height": 171,
-    "translated_height": 120,
+    "extracted_height": 195,
+    "translated_height": 397,
     "splitter_sizes": [],
     "save_screenshots": false,
-    "theme": "light",
+    "theme": "dark",
     "auto_copy": true,
     "follow_system_theme": false,
     "translation_mode": "auto",
-    "last_translate_lang": "en",
+    "last_translate_lang": "ur",
     "icon_path": "assets/icons/teaching_pariksha_logo.png",
-    "gemini_api_key": "AIzaSyD_m2T7pp6cXjk5u-y7NxoUZZxamt-RrPg",
+    "gemini_api_key": "AIzaSyAq1dnLigfya-yoFvxRJUBl3_xhpAwVL7s",
     "gemini_model": "gemini-2.5-flash-lite",
     "gemini_api_keys": [
-        "AIzaSyD_m2T7pp6cXjk5u-y7NxoUZZxamt-RrPg"
+        "AIzaSyAq1dnLigfya-yoFvxRJUBl3_xhpAwVL7s",
+        "AIzaSyB2hU_4oM1QZc3UjNp8Olm9dg7bgHv2pUo"
     ],
     "force_gemini_for_tables": false,
     "_comment": "Gemini-only OCR build",
@@ -23,5 +24,9 @@
         "eng",
         "hin"
     ],
-    "use_gemini_api": true
+    "use_gemini_api": true,
+    "last_ocr_lang": "eng+hin",
+    "shortcut_text": "alt+1",
+    "shortcut_table": "alt+2",
+    "shortcut_popup": "alt+3"
 }

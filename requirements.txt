@@ -22,3 +22,4 @@ pywin32==306 ; platform_system == "Windows"
 # --- Optional Hindi Postprocessing ---
 indic-nlp-library==0.92
 pypandoc
+keyboard

@@ -127,20 +127,16 @@ class OCRWorker(QObject):
 
             # --- Step 4: Mode-specific postprocessing ---
             try:
-                if self.layout_type == "text":
-                    logger.debug("Postprocess: applying TEXT mode pipeline")
-                    text = clean_text_mode_output(text)
-                    
-                elif self.layout_type == "table":
-                    logger.debug("Postprocess: applying TABLE mode pipeline")
+                if self.layout_type == "table":
+                    logger.debug("Postprocess: TABLE mode pipeline")
                     text = clean_table_mode_output(text)
-                    
-                elif self.layout_type == "math":
-                    logger.debug("Postprocess: applying MATH mode pipeline")
-                    text = clean_math_mode_output(text, for_display=True)
-                    
+
                 else:
-                    logger.warning(f"Unknown layout_type: {self.layout_type}, skipping postprocessing")
+                    # DEFAULT = TEXT + MATH merged mode
+                    logger.debug("Postprocess: merged TEXT+MATH pipeline")
+                    from core.postprocess import process_ocr_text_with_math
+                    text = process_ocr_text_with_math(text, for_display=True)
+                    text = clean_text_mode_output(text)
                     
             except Exception as e:
                 logger.exception(f"Mode-specific postprocessing failed: {e}")
