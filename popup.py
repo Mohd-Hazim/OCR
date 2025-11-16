@@ -387,11 +387,15 @@ class PopupWindow(QWidget):
     #  MULTI-KEY CHORD SHORTCUTS (Alt+T+1, Alt+T+2, Alt+T+P)
     # ===============================================================
     def _init_shortcuts(self):
+        """Initialize shortcut key tracking (simplified)."""
         self._key_buffer = []
         self._key_timer = QTimer(self)
-        self._key_timer.setInterval(600)   # 0.6 seconds to complete the combo
+        self._key_timer.setInterval(800)  # Increased to 0.8s for easier combos
         self._key_timer.setSingleShot(True)
         self._key_timer.timeout.connect(self._clear_key_buffer)
+        
+        # Track which modifier was pressed
+        self._alt_pressed = False
         
     def _begin_record_shortcut(self, box, key_name):
         box.setText("Recording…")
@@ -405,12 +409,19 @@ class PopupWindow(QWidget):
         save_config(self.config)
 
     def _clear_key_buffer(self):
+        """Clear the key buffer."""
+        if self._key_buffer:
+            logger.debug(f"Key buffer cleared: {self._key_buffer}")
         self._key_buffer.clear()
 
     def eventFilter(self, obj, event):
+        """
+        ✅ FIXED: Properly handle multi-key shortcuts with better timing.
+        """
         from PySide6.QtGui import QKeyEvent
         from PySide6.QtCore import QEvent
-        # ---------------- SHORTCUT RECORDING ----------------
+        
+        # ---------------- SHORTCUT RECORDING (unchanged) ----------------
         for box in [self.shortcut_text_box, self.shortcut_table_box, self.shortcut_popup_box]:
             if hasattr(box, "recording") and box.recording:
                 if event.type() == QEvent.KeyPress:
@@ -429,45 +440,62 @@ class PopupWindow(QWidget):
                     self._finish_record_shortcut(box, hotkey)
                     return True
 
-        if isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
-
-            # detect modifier
-            mods = event.modifiers()
-            if mods & Qt.AltModifier:
-
-                ch = event.text().lower()
-
-                if ch:
-                    self._key_buffer.append(ch)
-                    self._key_timer.start()
-
-                    # -------- Load shortcuts from config --------
-                    text_sc = self.config.get("shortcut_text", "alt+t+1").split("+")
-                    table_sc = self.config.get("shortcut_table", "alt+t+2").split("+")
-                    popup_sc = self.config.get("shortcut_popup", "alt+t+p").split("+")
-
-                    # Remove "alt" because eventFilter already matched ALT
-                    text_keys = text_sc[1:]
-                    table_keys = table_sc[1:]
-                    popup_keys = popup_sc[1:]
-
-                    # -------- Match keys for TEXT mode --------
-                    if self._key_buffer == text_keys:
-                        self._clear_key_buffer()
-                        self._start_capture_mode("text")
-                        return True
-
-                    # -------- Match keys for TABLE mode --------
-                    if self._key_buffer == table_keys:
-                        self._clear_key_buffer()
-                        self._start_capture_mode("table")
-                        return True
-
-                    # -------- Match keys for POPUP --------
-                    if self._key_buffer == popup_keys:
-                        self._clear_key_buffer()
-                        self._show_left_click_menu()
-                        return True
+        # ✅ NEW: Improved multi-key handling
+        if isinstance(event, QKeyEvent):
+            if event.type() == QEvent.KeyPress:
+                mods = event.modifiers()
+                key = event.key()
+                
+                # Track Alt modifier state
+                if key == Qt.Key_Alt:
+                    self._alt_pressed = True
+                    self._key_buffer.clear()
+                    return False
+                
+                # Only process keys when Alt is held
+                if self._alt_pressed and mods & Qt.AltModifier:
+                    key_text = event.text().lower()
+                    
+                    if key_text and key_text.isalnum():  # Only letters/numbers
+                        self._key_buffer.append(key_text)
+                        self._key_timer.start()  # Restart timer
+                        
+                        logger.debug(f"Key buffer: {self._key_buffer}")
+                        
+                        # Load shortcuts
+                        text_sc = self.config.get("shortcut_text", "alt+t+1").split("+")
+                        table_sc = self.config.get("shortcut_table", "alt+t+2").split("+")
+                        popup_sc = self.config.get("shortcut_popup", "alt+t+p").split("+")
+                        
+                        # Remove "alt" prefix
+                        text_keys = [k for k in text_sc if k != "alt"]
+                        table_keys = [k for k in table_sc if k != "alt"]
+                        popup_keys = [k for k in popup_sc if k != "alt"]
+                        
+                        # Check for matches
+                        if self._key_buffer == text_keys:
+                            logger.info("✅ TEXT shortcut matched")
+                            self._clear_key_buffer()
+                            self._start_capture_mode("text")
+                            return True
+                        
+                        if self._key_buffer == table_keys:
+                            logger.info("✅ TABLE shortcut matched")
+                            self._clear_key_buffer()
+                            self._start_capture_mode("table")
+                            return True
+                        
+                        if self._key_buffer == popup_keys:
+                            logger.info("✅ POPUP shortcut matched")
+                            self._clear_key_buffer()
+                            self._show_left_click_menu()
+                            return True
+            
+            elif event.type() == QEvent.KeyRelease:
+                if event.key() == Qt.Key_Alt:
+                    self._alt_pressed = False
+                    # Clear buffer when Alt is released
+                    QTimer.singleShot(100, self._clear_key_buffer)
 
         return super().eventFilter(obj, event)
 
@@ -3258,6 +3286,10 @@ class PopupWindow(QWidget):
     # IN-APP BACKGROUND HOTKEY LISTENER (works in tray mode)
     # ===============================================================
     def _start_hotkey_listener(self):
+        """
+        ✅ FIXED: Simplified background hotkey listener.
+        Only triggers when app is in tray/hidden.
+        """
         import keyboard
         import threading
 
@@ -3265,52 +3297,65 @@ class PopupWindow(QWidget):
             return
 
         def listener():
-            buffer = []
-
-            while True:
-                event = keyboard.read_event()
-
-                if event.event_type != "down":
-                    continue
-
-                key = event.name.lower()
-
-                # Handle Alt separately
-                if key == "alt":
-                    buffer = []
-                    continue
-
-                buffer.append(key)
-
-                if len(buffer) > 3:
-                    buffer = []
-
-                # ----- LOAD USER SHORTCUTS -----
-                shortcut_text  = self.config.get("shortcut_text",  "alt+t+1").split("+")
-                shortcut_table = self.config.get("shortcut_table", "alt+t+2").split("+")
-                shortcut_popup = self.config.get("shortcut_popup", "alt+t+p").split("+")
-
-                # ----- MATCH USER SHORTCUTS -----
-                if buffer == shortcut_text:
-                    buffer = []
-                    self.trigger_text.emit()
-
-                if buffer == shortcut_table:
-                    buffer = []
-                    self.trigger_table.emit()
-
-                if buffer == shortcut_popup:
-                    buffer = []
-                    self.trigger_popup.emit()
+            """Background thread for global hotkeys."""
+            
+            def on_text_hotkey():
+                logger.info("🔥 Global TEXT hotkey triggered")
+                self.trigger_text.emit()
+            
+            def on_table_hotkey():
+                logger.info("🔥 Global TABLE hotkey triggered")
+                self.trigger_table.emit()
+            
+            def on_popup_hotkey():
+                logger.info("🔥 Global POPUP hotkey triggered")
+                self.trigger_popup.emit()
+            
+            try:
+                # Register hotkeys from config
+                text_sc = self.config.get("shortcut_text", "alt+t+1")
+                table_sc = self.config.get("shortcut_table", "alt+t+2")
+                popup_sc = self.config.get("shortcut_popup", "alt+t+p")
+                
+                # Convert "alt+t+1" to keyboard format "alt+t+1"
+                keyboard.add_hotkey(text_sc, on_text_hotkey, suppress=True)
+                keyboard.add_hotkey(table_sc, on_table_hotkey, suppress=True)
+                keyboard.add_hotkey(popup_sc, on_popup_hotkey, suppress=True)
+                
+                logger.info(f"✅ Global hotkeys registered:")
+                logger.info(f"   Text: {text_sc}")
+                logger.info(f"   Table: {table_sc}")
+                logger.info(f"   Popup: {popup_sc}")
+                
+                # Keep thread alive
+                keyboard.wait()
+                
+            except Exception as e:
+                logger.error(f"Hotkey listener failed: {e}")
 
         self._hotkey_thread = threading.Thread(target=listener, daemon=True)
         self._hotkey_thread.start()
-
-    
+        
     def _start_capture_mode(self, mode: str):
+        """
+        Unified capture trigger for both shortcuts and UI.
+        Prevents conflicts between different trigger sources.
+        """
+        logger.info(f"🎯 Starting capture in {mode.upper()} mode")
+        
         self.shortcut_override_mode = mode
-        self.selected_content_mode = mode   # ensure both are set
-        self._set_capture_mode(mode)
+        self.selected_content_mode = mode
+        
+        # Update UI dropdown to match
+        if hasattr(self, 'mode_dropdown'):
+            self.mode_dropdown.setCurrentText("Text" if mode == "text" else "Tables")
+        
+        # Brief visual feedback
+        self.status_label.setText(f"📸 Capturing: {mode.title()}")
+        self.status_label.setVisible(True)
+        QTimer.singleShot(800, lambda: self.status_label.setVisible(False))
+        
+        # Start capture
         self.start_capture()
 
 def run_app():

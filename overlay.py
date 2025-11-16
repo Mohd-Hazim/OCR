@@ -1,13 +1,16 @@
-# gui/overlay.py - ENHANCED WITH CENTERED MODE DROPDOWN
+# gui/overlay.py - FIXED VERSION
 """
 Overlay with centered mode selector dropdown (Windows Snipping Tool style).
+FIXES:
+- Instant ESC response (no delays)
+- Mode selector appears on the screen where overlay was triggered
+- Proper multi-monitor support
 """
 import ctypes
 import logging
-from PySide6.QtWidgets import QWidget, QComboBox, QLabel, QHBoxLayout
-from PySide6.QtGui import QPainter, QColor, QPen
+from PySide6.QtWidgets import QWidget, QComboBox, QLabel, QHBoxLayout, QApplication
+from PySide6.QtGui import QPainter, QColor, QPen, QGuiApplication, QCursor
 from PySide6.QtCore import Qt, QRect, QPoint, QTimer
-from PySide6.QtWidgets import QApplication
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,6 @@ def get_virtual_screen_geometry() -> QRect:
         height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
         return QRect(left, top, width, height)
     except Exception:
-        from PySide6.QtGui import QGuiApplication
         rect = QRect()
         for screen in QGuiApplication.screens():
             rect = rect.united(screen.geometry())
@@ -50,6 +52,7 @@ class SelectionOverlay(QWidget):
         self.end_global = QPoint()
         self.dragging = False
         self.selected_mode = "text"  # Default mode
+        self.triggered_screen = None  # Track which screen triggered the overlay
 
         self.setWindowFlags(
             Qt.Window |
@@ -187,47 +190,78 @@ class SelectionOverlay(QWidget):
 
     def _position_control_bar(self):
         """
-        Place the control bar at the top center of the PRIMARY SCREEN.
-        
-        Multi-monitor behavior:
-        - Overlay dims ALL screens
-        - Control bar appears ONLY on primary screen
-        - User can still select regions on any monitor
+        ✅ FIXED: Place control bar on the screen where overlay was triggered.
+        Handles negative coordinates in multi-monitor setups.
         """
-        from PySide6.QtGui import QGuiApplication
-        
         bar_width = 700
         bar_height = 56
 
-        # Get primary screen geometry (where controls should appear)
-        primary_screen = QGuiApplication.primaryScreen()
-        if primary_screen:
-            screen_geo = primary_screen.geometry()
+        # ✅ Get the screen where overlay was triggered
+        if self.triggered_screen:
+            target_screen = self.triggered_screen
+        else:
+            # Fallback: use primary screen
+            target_screen = QGuiApplication.primaryScreen()
+        
+        if target_screen:
+            screen_geo = target_screen.geometry()
             
-            # Center horizontally on primary screen
-            screen_center_x = screen_geo.x() + (screen_geo.width() // 2)
+            # ✅ CRITICAL FIX: Convert screen coordinates to overlay local coordinates
+            # The overlay covers the entire virtual desktop starting at (0,0) in its own coordinate system
+            # But screens can have negative global coordinates (like -1080 for monitor above primary)
+            
+            # Get virtual desktop geometry
+            virtual_rect = get_virtual_screen_geometry()
+            
+            # Calculate offset between virtual desktop origin and overlay origin
+            # Overlay always starts at (0,0) in its own coordinates
+            # Virtual desktop might start at negative coordinates
+            offset_x = -virtual_rect.x()
+            offset_y = -virtual_rect.y()
+            
+            # Convert screen position to overlay-local coordinates
+            screen_x_local = screen_geo.x() + offset_x
+            screen_y_local = screen_geo.y() + offset_y
+            
+            # Center horizontally on target screen
+            screen_center_x = screen_x_local + (screen_geo.width() // 2)
             x = screen_center_x - (bar_width // 2)
             
-            # Position near top of primary screen
-            y = screen_geo.y() + 40
+            # Position near top of target screen
+            y = screen_y_local + 40
             
-            logger.debug(f"Control bar positioned on primary screen at ({x}, {y})")
+            logger.info(f"Control bar positioning:")
+            logger.info(f"  Screen: {target_screen.name()}")
+            logger.info(f"  Screen global: ({screen_geo.x()}, {screen_geo.y()})")
+            logger.info(f"  Virtual offset: ({offset_x}, {offset_y})")
+            logger.info(f"  Overlay local: ({screen_x_local}, {screen_y_local})")
+            logger.info(f"  Control bar at: ({x}, {y})")
         else:
-            # Fallback: center on overlay (shouldn't happen)
+            # Fallback: center on overlay
             x = (self.width() - bar_width) // 2
             y = 40
-            logger.warning("Primary screen not detected, using fallback positioning")
+            logger.warning("Target screen not detected, using fallback positioning")
 
         self.control_bar.setGeometry(x, y, bar_width, bar_height)
-
 
     # -----------------------------------------------------
     def showFullDesktop(self):
         """Show overlay covering all monitors with mode selector."""
+        # ✅ Detect which screen the mouse is currently on
+        from PySide6.QtGui import QCursor
+        cursor_pos = QCursor.pos()
+        self.triggered_screen = QGuiApplication.screenAt(cursor_pos)
+        
+        if not self.triggered_screen:
+            self.triggered_screen = QGuiApplication.primaryScreen()
+        
+        logger.info(f"Overlay triggered on screen: {self.triggered_screen.name()}")
+        
+        # Cover all screens
         virtual_rect = get_virtual_screen_geometry()
         self.setGeometry(virtual_rect)
         
-        # Show and position control bar
+        # Show and position control bar on triggered screen
         self.control_bar.show()
         self._position_control_bar()
         
@@ -289,41 +323,34 @@ class SelectionOverlay(QWidget):
             QTimer.singleShot(120, lambda r=rect: self.parent_window.on_selection_made(r))
 
     def keyPressEvent(self, event):
-        """Handle keyboard events - INSTANT response with no delays."""
+        """
+        ✅ FIXED: Handle keyboard events with INSTANT response.
+        No delays, no animations, pure immediate close.
+        """
         if event.key() == Qt.Key_Escape:
-            logger.info("Selection cancelled by user (ESC) - instant close")
+            logger.info("🚫 ESC pressed - INSTANT CLOSE")
             
-            # 1. Stop any ongoing operations
+            # Stop everything immediately
             self.dragging = False
             
-            # 2. Hide overlay components IMMEDIATELY (no animation)
+            # Hide UI instantly (no animations)
             self.control_bar.setVisible(False)
-            self.control_bar.hide()
-            
-            # 3. Close overlay with direct OS-level hide
             self.setVisible(False)
-            self.hide()
-            self.close()  # Force window destruction path
             
-            # 4. Force immediate rendering update
-            from PySide6.QtCore import QCoreApplication, QEventLoop
-            QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents | QEventLoop.ExcludeSocketNotifiers)
-            QApplication.processEvents()
-
-            # 5. Restore main window immediately
+            # Force immediate window destruction
+            self.close()
+            
+            # Restore main window immediately
             if self.parent_window:
                 self.parent_window.setVisible(True)
                 self.parent_window.show()
                 self.parent_window.raise_()
                 self.parent_window.activateWindow()
-                self.parent_window.setFocus()
-                
-                # Force immediate activation
-                QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-                QApplication.processEvents()
             
-            # 6. Accept event to prevent any further processing
+            # Accept event to stop propagation
             event.accept()
+            
+            logger.info("✅ Overlay closed instantly")
             return
         
         super().keyPressEvent(event)
