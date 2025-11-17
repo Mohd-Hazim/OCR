@@ -356,10 +356,8 @@ class PopupWindow(QWidget):
         self._setup_tray()
         self._init_copied_label()
         self._init_loaders()
-        from gui.mode_selector import ModeSelector
-        self.mode_popup = ModeSelector()
-        self.mode_popup.mode_selected.connect(self._on_mode_chosen)
-        # no cancelled signal, so don't connect anything
+        # Mode selector disabled (using main dropdown instead)
+        self.mode_popup = None
 
         self._init_shortcuts()
         self.installEventFilter(self)
@@ -532,34 +530,6 @@ class PopupWindow(QWidget):
 
         menu.exec(QCursor.pos())
 
-    def _reset_layout_sizes(self):
-        """Reset all sizes to defaults."""
-        # Reset window size
-        self.resize(440, 560)
-        
-        # Reset box heights
-        if hasattr(self, 'preview_box'):
-            self.preview_box.set_height(210)
-            self.preview_box.save_height()
-        
-        if hasattr(self, 'extracted_resizable'):
-            self.extracted_resizable.set_height(180)
-            self.extracted_resizable.save_height()
-        
-        if hasattr(self, 'translated_resizable'):
-            self.translated_resizable.set_height(180)
-            self.translated_resizable.save_height()
-        
-        # Save window size
-        LayoutManager.save_window_size(440, 560)
-        
-        # Show confirmation
-        self.status_label.setText("✅ Layout reset to defaults")
-        self.status_label.setVisible(True)
-        QTimer.singleShot(2000, lambda: self.status_label.setVisible(False))
-        
-        logger.info("Layout sizes reset to defaults")
-        
     # ---------- Copied feedback ----------
     def _init_copied_label(self):
         self.copied_label = QLabel("Copied!", self)
@@ -1261,15 +1231,6 @@ class PopupWindow(QWidget):
         self.api_key_list.addItems(keys)
         layout.addWidget(self.api_key_list)
 
-        layout.addWidget(QLabel("Active API Key"))
-        self.active_key_combo = QComboBox()
-        self.active_key_combo.addItems(keys)
-        current_key = self.config.get("gemini_api_key", "")
-        if current_key in keys:
-            self.active_key_combo.setCurrentText(current_key)
-        self.active_key_combo.currentTextChanged.connect(self._on_active_key_changed)
-        layout.addWidget(self.active_key_combo)
-
         btn_row = QHBoxLayout()
         add_btn = QPushButton("Add Key")
         rem_btn = QPushButton("Remove Key")
@@ -1277,12 +1238,6 @@ class PopupWindow(QWidget):
         rem_btn.clicked.connect(self.remove_api_key)
         btn_row.addWidget(add_btn)
         btn_row.addWidget(rem_btn)
-        # --- ADD THIS SECTION (Reset Layout Button) ---
-        layout.addWidget(QLabel(""))  # Spacer
-        reset_layout_btn = QPushButton("Reset Layout to Defaults")
-        reset_layout_btn.setToolTip("Reset window and box sizes to default values")
-        reset_layout_btn.clicked.connect(self._reset_layout_sizes)
-        layout.addWidget(reset_layout_btn)
         layout.addLayout(btn_row)
         
         # ------------------ SHORTCUT SETTINGS ------------------
@@ -1317,13 +1272,6 @@ class PopupWindow(QWidget):
         self.shortcut_text_box.mousePressEvent = lambda e: self._begin_record_shortcut(self.shortcut_text_box, "shortcut_text")
         self.shortcut_table_box.mousePressEvent = lambda e: self._begin_record_shortcut(self.shortcut_table_box, "shortcut_table")
         self.shortcut_popup_box.mousePressEvent = lambda e: self._begin_record_shortcut(self.shortcut_popup_box, "shortcut_popup")
-
-    def _on_active_key_changed(self, key):
-        """Update the currently active Gemini API key."""
-        if key.strip():
-            self.config["gemini_api_key"] = key.strip()
-            save_config(self.config)
-            logger.info(f"Active Gemini API key changed to {key[:8]}...")
         
     def _ensure_overlay_widget(self):
         """Create or reuse a blurred translucent overlay behind the settings panel (Mica-style)."""
@@ -1860,18 +1808,7 @@ class PopupWindow(QWidget):
         layout.addWidget(widget)
         frame.setObjectName("textCard")
         return frame
-    
-    def _ensure_fade_overlay(self):
-        """Create a reusable overlay for theme transition."""
-        if hasattr(self, "_fade_overlay"):
-            return
-        from PySide6.QtWidgets import QWidget
-        self._fade_overlay = QWidget(self)
-        self._fade_overlay.setObjectName("fadeOverlay")
-        self._fade_overlay.setStyleSheet("background-color: black;")
-        self._fade_overlay.setAutoFillBackground(True)
-        self._fade_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._fade_overlay.hide()
+
         
     def _animate_icon_hover(self, button, entering: bool):
         """Subtle hover animation for buttons (opacity fade)."""
@@ -1959,29 +1896,6 @@ class PopupWindow(QWidget):
         palette.setColor(QPalette.Base, QColor(bg))
         palette.setColor(QPalette.WindowText, QColor(text))
         self.setPalette(palette)
-
-        # --- Create or update overlay ---
-        if not hasattr(self, "_fade_overlay"):
-            self._fade_overlay = QWidget(self)
-            self._fade_overlay.setAutoFillBackground(True)
-            self._fade_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self._fade_overlay.hide()
-
-        self._fade_overlay.setGeometry(self.rect())
-        self._fade_overlay.setStyleSheet(f"background-color: {fade_color};")
-        self._fade_overlay.show()
-        self._fade_overlay.raise_()
-
-        # --- Overlay opacity effect ---
-        fade_effect = QGraphicsOpacityEffect(self._fade_overlay)
-        self._fade_overlay.setGraphicsEffect(fade_effect)
-
-        # --- Smooth fade animation ---
-        fade_anim = QPropertyAnimation(fade_effect, b"opacity")
-        fade_anim.setDuration(650)                     # smoother, longer fade
-        fade_anim.setEasingCurve(QEasingCurve.InOutQuad)  # softer easing
-        fade_anim.setStartValue(1.0)
-        fade_anim.setEndValue(0.0)
 
         # --- Apply enhanced stylesheet ---
         self.setUpdatesEnabled(False)
@@ -2207,18 +2121,9 @@ class PopupWindow(QWidget):
                 }}
             """)
         self._apply_theme_to_text_boxes()
-
-        # --- Cleanup after fade ---
-        def cleanup_fade():
-            self._fade_overlay.hide()
-            fade_effect.deleteLater()
             
         if hasattr(self, "_last_user_size"):
             self.resize(self._last_user_size)
-
-        fade_anim.finished.connect(cleanup_fade)
-        fade_anim.start()
-        self._fade_anim = fade_anim
 
         # --- Copy icon + text update ---
         def update_copy_button(button):
@@ -2391,7 +2296,8 @@ class PopupWindow(QWidget):
         else:
             # Normal behavior — show overlay + dropdown
             self.overlay.selected_mode = self.selected_content_mode
-            self.overlay.control_bar.show()
+            # Hide old overlay UI (we now use only header dropdown)
+            self.overlay.control_bar.hide()
 
         self.overlay.showFullDesktop()
 
@@ -2798,9 +2704,9 @@ class PopupWindow(QWidget):
         if hasattr(self, "translated_box"):
             self.translated_box.setStyleSheet(qss)
 
-        if hasattr(self, 'mode_popup'):
-            self.mode_popup.update_theme(theme)
-            logger.debug(f"Mode selector theme updated to: {theme}")
+        # Mode popup removed → do nothing
+        pass
+        logger.debug(f"Mode selector theme updated to: {self.current_theme}")
     
     def _apply_content_styling(self, html_content: str) -> str:
         """
