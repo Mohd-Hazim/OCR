@@ -882,7 +882,12 @@ class PopupWindow(QWidget):
         self._init_settings_panel()
 
         # --- Preview Box (Zoomable) ---
-        root.addWidget(self._section_label("Preview Image"))
+        preview_row = self._section_label_row("Preview Image")
+        root.addLayout(preview_row)
+
+        preview_label = preview_row.itemAt(0).widget()
+        preview_label.setObjectName("sectionLabel")
+
         self.preview_widget = ZoomablePreviewWidget()
         self.preview_widget.setMinimumHeight(100)
         self.preview_widget.setMaximumHeight(400)
@@ -994,29 +999,22 @@ class PopupWindow(QWidget):
         root.addWidget(translate_container)
         root.addLayout(row)
 
-       # --- Translated Text (hidden until Translate) ---
-
-        # Label (stored for theme update, but NOT added to layout directly)
-        self.translated_label = self._section_label("Translated Text")
-        self.translated_label.setVisible(False)
-
-        # Build textbox + copy button
+        # --- Translated Text (hidden until Translate) ---
         self.translated_frame, self.translated_box, tr_copy_btn = self._textbox_with_copy()
 
-        # Row with label + copy button (this is the ONLY visible row)
-        self.tr_row = QHBoxLayout()
+        # Create label explicitly
         self.tr_label = QLabel("Translated Text")
         self.tr_label.setObjectName("sectionLabel")
+        self.tr_label.setVisible(False)  # Hidden until translation
 
+        # Row with label + copy button
+        self.tr_row = QHBoxLayout()
         self.tr_row.addWidget(self.tr_label)
         self.tr_row.addStretch()
         self.tr_row.addWidget(tr_copy_btn)
-
-        # Add row to layout
         root.addLayout(self.tr_row)
 
-        # Hide entire section until translation
-        self.tr_label.setVisible(False)
+        # Hide everything initially
         tr_copy_btn.setVisible(False)
         self.translated_frame.setVisible(False)
 
@@ -1676,59 +1674,6 @@ class PopupWindow(QWidget):
         except Exception as e:
             logger.warning(f"RTF conversion failed: {e}")
             return ""
-    
-    # ADD this helper method to the PopupWindow class
-    def _html_to_rtf(self, html: str) -> str:
-        """
-        Convert HTML to RTF format for better Word compatibility.
-        This is a simplified converter for tables.
-        """
-        from bs4 import BeautifulSoup
-        
-        try:
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # RTF header
-            rtf = r"{\rtf1\ansi\deff0"
-            rtf += r"{\fonttbl{\f0\fnil\fcharset0 Calibri;}}"
-            rtf += r"\viewkind4\uc1\pard\f0\fs22 "
-            
-            # Process tables
-            for table in soup.find_all('table'):
-                rtf += r"\par\trowd\trgaph70"
-                
-                # Get column count from first row
-                first_row = table.find('tr')
-                if first_row:
-                    col_count = len(first_row.find_all(['td', 'th']))
-                    
-                    # Define cell widths
-                    cell_width = 2000  # Twips
-                    for i in range(col_count):
-                        rtf += f"\\cellx{(i+1) * cell_width}"
-                    
-                    # Process rows
-                    for row in table.find_all('tr'):
-                        for cell in row.find_all(['td', 'th']):
-                            cell_text = cell.get_text(strip=True)
-                            rtf += f" {cell_text}\\cell"
-                        rtf += "\\row\\trowd\\trgaph70"
-                        for i in range(col_count):
-                            rtf += f"\\cellx{(i+1) * cell_width}"
-            
-            # Process text outside tables
-            for p in soup.find_all('p'):
-                text = p.get_text(strip=True)
-                if text:
-                    rtf += f"\\par {text}"
-            
-            rtf += r"\par}"
-            
-            return rtf
-            
-        except Exception as e:
-            logger.warning(f"RTF conversion failed: {e}")
-            return ""
         
     def copy_action():
         from PySide6.QtCore import QMimeData
@@ -1799,6 +1744,14 @@ class PopupWindow(QWidget):
         row.addStretch()
         row.addWidget(copy_btn)
 
+        return row
+    
+    def _section_label_row(self, text):
+        row = QHBoxLayout()
+        label = QLabel(text)
+        label.setObjectName("sectionLabel")
+        row.addWidget(label)
+        row.addStretch()
         return row
 
     def _with_card(self, widget):
@@ -1981,8 +1934,7 @@ class PopupWindow(QWidget):
                 background: {header_bg};
                 border-bottom: 1px solid {header_border};
                 padding: 6px 10px;
-                border-top-left-radius: 10px;      /* ✅ rounded top-left */
-                border-top-right-radius: 10px;     /* ✅ rounded top-right */
+                border-radius: 10px;  /* ✅ rounded all corners */
             }}
             QProgressBar {{
                 background: {darker};
@@ -2439,22 +2391,14 @@ class PopupWindow(QWidget):
         logger.info(f"Started OCR worker: mode={layout_type}, override={override_model}")
         
     def _on_preview_loaded(self, pixmap):
-        """Receive pixmap from background worker and display it correctly."""
         if pixmap is None:
             return
         try:
-            # Your ZoomablePreviewWidget expects a QPixmap
-            if hasattr(self.preview_widget, "set_image"):
-                self.preview_widget.set_image(pixmap)
-            else:
-                # Fallback if the widget still uses PIL-based loader
-                from PIL import ImageQt
-                pil_img = ImageQt.fromqpixmap(pixmap)
-                self.preview_widget.set_image_from_pil(pil_img)
+            # ZoomablePreviewWidget has set_pixmap() method
+            self.preview_widget.set_pixmap(pixmap)
             logger.info("✅ Preview image displayed successfully")
         except Exception as e:
             logger.warning(f"Preview display failed: {e}")
-
 
     def _on_ocr_done(self, text, translated):
         """Handle OCR completion - hide loader BEFORE showing text."""
@@ -2509,7 +2453,6 @@ class PopupWindow(QWidget):
     # =========================================================================
 
     def run_translation(self):
-        """Enhanced translation with immediate loader."""
         text = self.extracted_box.toPlainText().strip()
         if not text:
             self.status_label.setText("No text to translate.")
@@ -2520,15 +2463,15 @@ class PopupWindow(QWidget):
 
         # Clear old translation
         self.translated_box.clear()
-        
-        # Make translation box visible
-        self.translated_label.setVisible(True)
+
+        # FIXED — use tr_label instead of translated_label
+        self.tr_label.setVisible(True)
         self.translated_resizable.setVisible(True)
 
-        # ✅ Show loader IMMEDIATELY
+        # Show loader immediately
         self._show_loader(self.loader_translated, immediate=True)
 
-        # Start translation thread
+        # Start worker thread
         self._tran_thread = QThread()
         self._tran_worker = TranslatorThread(text, dest)
         self._tran_worker.moveToThread(self._tran_thread)
@@ -2813,56 +2756,6 @@ class PopupWindow(QWidget):
         
         return styled
 
-
-    def _render_formatted_content(self, text: str):
-        """
-        Render extracted content with proper formatting and math support.
-        
-        Handles:
-        - LaTeX → MathML conversion
-        - HTML content (tables, lists)
-        - Plain text with bullet points
-        - Mathematical formulas (inline and display)
-        - Tables with VISIBLE BORDERS in app
-        """
-        from core.postprocess import process_ocr_text_with_math, prepare_math_for_clipboard
-        
-        if not text:
-            self.extracted_box.setPlainText("")
-            return
-        
-        # Handle dict results from math mode (with images/OMML)
-        if isinstance(text, dict):
-            text = text.get("text", "")
-        
-        # Step 1: Process math formulas
-        text = process_ocr_text_with_math(text, for_display=True)
-        
-        # Step 2: Check content type
-        has_html = any(tag in text.lower() for tag in ['<table', '<ul>', '<ol>', '<li>', '<math'])
-        
-        if has_html:
-            # Render as HTML with math support
-            # Apply theme-specific styling for APP DISPLAY
-            styled_html = self._apply_content_styling(text)
-            
-            # For display in app: Show with theme colors
-            display_html = styled_html
-            
-            self.extracted_box.setHtml(display_html)
-            
-            # Store ORIGINAL HTML for clipboard (will be converted to Table Grid on copy)
-            self._last_full_html = text  # Store raw HTML without theme styling
-            
-            logger.info("✅ Rendered content with visible table borders")
-        else:
-            # Plain text path
-            formatted_text = self._smart_format_text(text)
-            html_content = self._plain_text_to_html(formatted_text)
-            self.extracted_box.setHtml(html_content)
-            self._last_full_html = html_content
-            
-            logger.info("Rendered plain text with formatting")
 
     def _plain_text_to_html(self, text: str) -> str:
         """
@@ -3340,46 +3233,6 @@ class PopupWindow(QWidget):
         fade_in.start()
         self._theme_fade_in_anim = fade_in
 
-
-    # Also add this helper method to ensure overlay resizes with window
-    def resizeEvent(self, event):
-        """Handle window resize - update overlay geometry."""
-        super().resizeEvent(event)
-        
-        # Update theme fade overlay if it exists
-        if hasattr(self, "_theme_fade_overlay"):
-            self._theme_fade_overlay.setGeometry(self.rect())
-        
-        # ... rest of your existing resizeEvent code ...
-        
-        # Save last size to restore after e.g. theme transitions
-        self._last_user_size = self.size()
-
-        # Debounced save of window size (to avoid thrashing disk)
-        if not hasattr(self, '_resize_save_timer'):
-            self._resize_save_timer = QTimer(self)
-            self._resize_save_timer.setSingleShot(True)
-            self._resize_save_timer.timeout.connect(
-                lambda: LayoutManager.save_window_size(self.width(), self.height())
-            )
-        self._resize_save_timer.stop()
-        self._resize_save_timer.start(800)
-
-        # Keep the settings panel anchored to the right and overlays in sync
-        try:
-            if hasattr(self, "settings_panel") and self.settings_panel.isVisible():
-                self.settings_panel.setGeometry(
-                    max(self.width() - self.settings_panel.width(), 180),
-                    0,
-                    self.settings_panel.width(),
-                    self.height()
-                )
-            if hasattr(self, "_overlay_widget"):
-                self._overlay_widget.setGeometry(self.rect())
-            if hasattr(self, "_fade_overlay"):
-                self._fade_overlay.setGeometry(self.rect())
-        except Exception:
-            logger.exception("Error during resizeEvent geometry sync")
         
 def run_app():
     from PySide6.QtCore import Qt, QCoreApplication, QTimer
