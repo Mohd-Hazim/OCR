@@ -2266,41 +2266,26 @@ class PopupWindow(QWidget):
         self.copy_icon_opacity = 0.6 if theme == "dark" else 0.75
     
     def _on_theme_toggled(self, is_dark: bool):
+        """Handle theme toggle with smooth animation."""
         theme = "dark" if is_dark else "light"
-        self._apply_theme(theme)
-
-        # ✅ Reapply styling for side panel if it exists
-        if hasattr(self, "settings_panel"):
-            self._update_settings_panel_theme()
-        # ✅ Update overlay tint dynamically when theme changes
-        if hasattr(self, "_overlay_widget"):
-            self._ensure_overlay_widget()
-        # Update toggle accent dynamically
-        for child in self.findChildren(ToggleSwitch):
-            if self.current_theme == "dark":
-                child._accent = "#3E9CF6"
-            else:
-                child._accent = "#0078D4"
-            child.update()
+        logger.info(f"Theme toggled to: {theme}")
+        
+        # Apply all theme changes with smooth animation
+        self._animate_theme_transition(theme)
 
     # ---------- OCR flow ----------
     def start_capture(self):
-        """Show overlay with integrated mode dropdown."""
+        """Show overlay without mode selector (mode already chosen in header)."""
         self.hide()
-        if self.shortcut_override_mode:
-            # Shortcuts override overlay mode completely
-            mode = self.shortcut_override_mode
-            self.overlay.selected_mode = mode
-            self.overlay.mode_dropdown.setCurrentText("Text" if mode=="text" else "Table")
-            self.overlay.control_bar.hide()       # ❗ hide UI bar when shortcut is used
-        else:
-            # Normal behavior — show overlay + dropdown
-            self.overlay.selected_mode = self.selected_content_mode
-            # Hide old overlay UI (we now use only header dropdown)
-            self.overlay.control_bar.hide()
-
+        
+        # Mode is set by the dropdown in main window header
+        # Just pass it to the overlay
+        self.overlay.selected_mode = self.selected_content_mode
+        
+        logger.info(f"Starting capture in {self.selected_content_mode.upper()} mode")
+        
+        # Show clean overlay (no UI controls)
         self.overlay.showFullDesktop()
-
         
         logger.info("Mode selector shown - waiting for user choice")
 
@@ -3263,7 +3248,139 @@ class PopupWindow(QWidget):
         
         # Start capture
         self.start_capture()
+        
+    def _animate_theme_transition(self, new_theme: str):
+        """
+        Smooth fade transition between themes.
+        Creates a black overlay that fades in, applies theme, then fades out.
+        """
+        from PySide6.QtWidgets import QWidget, QGraphicsOpacityEffect, QApplication
+        from PySide6.QtCore import QTimer
+        from gui.animations import make_anim, EASE_SOFT, ANIM_FAST
+        
+        # Create fade overlay if it doesn't exist
+        if not hasattr(self, "_theme_fade_overlay"):
+            self._theme_fade_overlay = QWidget(self)
+            self._theme_fade_overlay.setAutoFillBackground(True)
+            self._theme_fade_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            
+            # Add opacity effect
+            fade_effect = QGraphicsOpacityEffect(self._theme_fade_overlay)
+            self._theme_fade_overlay.setGraphicsEffect(fade_effect)
+            self._theme_fade_overlay._fade_effect = fade_effect
+        
+        # Set overlay color based on target theme
+        if new_theme == "dark":
+            self._theme_fade_overlay.setStyleSheet("background-color: #000000;")
+        else:
+            self._theme_fade_overlay.setStyleSheet("background-color: #FFFFFF;")
+        
+        # Position overlay
+        self._theme_fade_overlay.setGeometry(self.rect())
+        self._theme_fade_overlay.raise_()
+        self._theme_fade_overlay.show()
+        
+        # Step 1: Fade IN (darken screen)
+        fade_in = make_anim(
+            self._theme_fade_overlay._fade_effect,
+            b"opacity",
+            0.0,
+            1.0,
+            dur=ANIM_FAST,  # 180ms
+            curve=EASE_SOFT
+        )
+        
+        def apply_theme_and_fade_out():
+            """Apply theme at peak of fade, then fade out."""
+            # Apply all theme changes
+            self._apply_theme(new_theme)
+            
+            # Update settings panel theme
+            if hasattr(self, "settings_panel"):
+                self._update_settings_panel_theme()
+            
+            # Update overlay tint
+            if hasattr(self, "_overlay_widget"):
+                self._ensure_overlay_widget()
+            
+            # Update toggle switch accents
+            for child in self.findChildren(ToggleSwitch):
+                child.update()
+            
+            # Force immediate UI refresh
+            QApplication.processEvents()
+            self.repaint()
+            
+            # Small delay before fade out for visual stability
+            QTimer.singleShot(50, start_fade_out)
+        
+        def start_fade_out():
+            """Fade out the overlay."""
+            fade_out = make_anim(
+                self._theme_fade_overlay._fade_effect,
+                b"opacity",
+                1.0,
+                0.0,
+                dur=ANIM_FAST,  # 180ms
+                curve=EASE_SOFT
+            )
+            
+            def cleanup():
+                """Hide overlay and ensure UI is fully updated."""
+                self._theme_fade_overlay.hide()
+                QApplication.processEvents()
+                logger.info(f"✅ Theme transition complete: {new_theme}")
+            
+            fade_out.finished.connect(cleanup)
+            fade_out.start()
+            self._theme_fade_out_anim = fade_out
+        
+        # Connect and start fade in
+        fade_in.finished.connect(apply_theme_and_fade_out)
+        fade_in.start()
+        self._theme_fade_in_anim = fade_in
 
+
+    # Also add this helper method to ensure overlay resizes with window
+    def resizeEvent(self, event):
+        """Handle window resize - update overlay geometry."""
+        super().resizeEvent(event)
+        
+        # Update theme fade overlay if it exists
+        if hasattr(self, "_theme_fade_overlay"):
+            self._theme_fade_overlay.setGeometry(self.rect())
+        
+        # ... rest of your existing resizeEvent code ...
+        
+        # Save last size to restore after e.g. theme transitions
+        self._last_user_size = self.size()
+
+        # Debounced save of window size (to avoid thrashing disk)
+        if not hasattr(self, '_resize_save_timer'):
+            self._resize_save_timer = QTimer(self)
+            self._resize_save_timer.setSingleShot(True)
+            self._resize_save_timer.timeout.connect(
+                lambda: LayoutManager.save_window_size(self.width(), self.height())
+            )
+        self._resize_save_timer.stop()
+        self._resize_save_timer.start(800)
+
+        # Keep the settings panel anchored to the right and overlays in sync
+        try:
+            if hasattr(self, "settings_panel") and self.settings_panel.isVisible():
+                self.settings_panel.setGeometry(
+                    max(self.width() - self.settings_panel.width(), 180),
+                    0,
+                    self.settings_panel.width(),
+                    self.height()
+                )
+            if hasattr(self, "_overlay_widget"):
+                self._overlay_widget.setGeometry(self.rect())
+            if hasattr(self, "_fade_overlay"):
+                self._fade_overlay.setGeometry(self.rect())
+        except Exception:
+            logger.exception("Error during resizeEvent geometry sync")
+        
 def run_app():
     from PySide6.QtCore import Qt, QCoreApplication, QTimer
     from PySide6.QtWidgets import QApplication
