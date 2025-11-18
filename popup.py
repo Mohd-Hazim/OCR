@@ -43,7 +43,7 @@ from PySide6.QtCore import (
 )
 from core import capture
 from core.capture import capture_region
-from core.worker import OCRWorker
+from core.optimized_worker import OptimizedOCRWorker as OCRWorker
 
 try:
     from gui.overlay import SelectionOverlay

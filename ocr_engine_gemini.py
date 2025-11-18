@@ -15,13 +15,18 @@ logger = logging.getLogger(__name__)
 
 # 🔥 NEW: round-robin API key provider
 try:
-    from core.gemini_pro_client import get_next_api_key
+    from core.optimized_gemini_client import get_next_api_key
 except ImportError:
     def get_next_api_key():
         return None
+from functools import lru_cache
+
+@lru_cache(maxsize=4)
+def get_model_cached(name):
+    return genai.GenerativeModel(name)
 
 
-def run_gemini_ocr(pil_image: Image.Image, api_key: str, model_name: str):
+async def run_gemini_ocr(pil_image: Image.Image, api_key: str, model_name: str):
     """
     Run OCR using Gemini API with enhanced math formula support.
 
@@ -47,13 +52,16 @@ def run_gemini_ocr(pil_image: Image.Image, api_key: str, model_name: str):
         genai.configure(api_key=selected_key)
 
         # Convert image to Base64
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format="PNG")
-        img_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        import cv2
+        import numpy as np
+
+        arr = np.array(pil_image.convert("RGB"))
+        success, png_bytes = cv2.imencode(".png", arr)
+        img_b64 = base64.b64encode(png_bytes).decode("utf-8")
 
         logger.info(f"🔹 Gemini OCR started using model: {model_name}")
 
-        model = genai.GenerativeModel(model_name)
+        model = get_model_cached(model_name)
 
         # ENHANCED PROMPT FOR MATH FORMULAS
         prompt = """Extract all text exactly as shown in the image, including mathematical formulas.
@@ -82,10 +90,15 @@ CRITICAL RULES FOR MATH FORMULAS:
 NOW EXTRACT:
 """
 
-        response = model.generate_content([
-            {"text": prompt},
-            {"inline_data": {"mime_type": "image/png", "data": img_b64}},
-        ])
+        import asyncio
+
+        response = await asyncio.to_thread(
+            model.generate_content,
+            [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/png", "data": img_b64}},
+            ]
+        )
 
         text = getattr(response, "text", "").strip()
 

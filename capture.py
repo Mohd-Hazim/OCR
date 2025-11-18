@@ -115,7 +115,7 @@ def capture_region(x, y, w, h):
     print("\n" + "-" * 80)
     # DISABLE DXCAM (GPU) FOR CPU-ONLY MODE
     img = None
-    # img = _try_dxcam_capture_debug(x, y, w, h, idx, dpr)
+    img = _try_dxcam_capture_debug(x, y, w, h, idx, dpr)
     
     print("\n" + "-" * 80)
     img = _try_qt_capture_debug(x, y, w, h, screen, screen_geo)
