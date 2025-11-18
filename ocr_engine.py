@@ -21,42 +21,37 @@ try:
 except ImportError:
     def get_force_gemini(): return False
 
+# 🔥 NEW: round-robin API key provider
+try:
+    from core.gemini_pro_client import get_next_api_key
+except ImportError:
+    def get_next_api_key():
+        return None
+
 
 # ===================================================================
-# MODEL SELECTION (Simplified)
+# MODEL SELECTION (Unchanged)
 # ===================================================================
 def select_model_for_region(image=None, layout_hint=None, layout_confidence=None):
-    """
-    Behavior (unchanged):
-    - If manual override enabled → Always Gemini Pro (skip detection)
-    - Else:
-        * If use_gemini_api=True → Use Gemini Flash/Lite
-        * If use_gemini_api=False → USED TO fall back to Tesseract, now always Gemini
-    """
     try:
-        # 1️⃣ Manual override
         if get_force_gemini():
-            logger.info("⚙️ Manual override enabled → Using Gemini Pro (auto-detection disabled).")
+            logger.info("⚙️ Manual override → Gemini Pro")
             return "gemini-2.5-pro", {"src": "manual_override", "mode": "complete"}
 
-        # 2️⃣ Default user preference
         use_gemini = get_config_value("use_gemini_api", False)
         gemini_model = get_config_value("gemini_model", "gemini-2.5-flash-lite")
 
-        logger.info(f"🔧 Config: use_gemini_api={use_gemini}, gemini_model={gemini_model}")
+        logger.info(f"🔧 use_gemini_api={use_gemini}, gemini_model={gemini_model}")
 
-        # ALWAYS GEMINI
-        logger.info(f"✅ Using Gemini model: {gemini_model}")
         return gemini_model, {"src": "user_selection", "mode": "text"}
 
     except Exception as e:
         logger.exception(f"Model selection failed: {e}")
-        # fallback → still Gemini
         return "gemini-2.5-flash-lite", {"src": "error", "mode": "fallback"}
 
 
 # ===================================================================
-# DPI helper (kept for compatibility with your pipeline)
+# DPI helper (Unchanged)
 # ===================================================================
 def _get_resample_filter():
     try:
@@ -65,8 +60,7 @@ def _get_resample_filter():
         return Image.LANCZOS
 
 
-def ensure_dpi(pil_img: Image.Image, target_dpi: int = 300, min_size: int = 1000) -> Image.Image:
-    """KEEPING this unchanged because Gemini Pro extraction benefits from it."""
+def ensure_dpi(pil_img: Image.Image, target_dpi: int = 300, min_size: int = 1000):
     if pil_img is None:
         return pil_img
 
@@ -88,9 +82,9 @@ def ensure_dpi(pil_img: Image.Image, target_dpi: int = 300, min_size: int = 1000
         try:
             resample = _get_resample_filter()
             pil_img = pil_img.resize((int(w * scale), int(h * scale)), resample=resample)
-            logger.debug(f"Scaled image {w}x{h} → {pil_img.size} (scale={scale:.2f})")
+            logger.debug(f"Scaled {w}x{h} → {pil_img.size} (scale={scale:.2f})")
         except Exception as e:
-            logger.warning(f"Failed DPI scaling: {e}")
+            logger.warning(f"DPI scaling failed: {e}")
 
     try:
         pil_img.info["dpi"] = (target_dpi, target_dpi)
@@ -107,21 +101,20 @@ def ensure_dpi(pil_img: Image.Image, target_dpi: int = 300, min_size: int = 1000
 
 
 # ===================================================================
-# MAIN OCR (Gemini Only)
+# MAIN OCR (Gemini Only) — MODIFIED FOR ROUND-ROBIN KEYS
 # ===================================================================
 def run_ocr(pil_image: Image.Image, langs: str = "eng+hin", psm: int = 6,
             layout_type: str = None, layout_confidence: float = None,
-            model_override: str = None):
+            model_override: str = None, api_key: str = None):
     """
-    Unified OCR Pipeline — *GEMINI ONLY*.
+    Unified OCR Pipeline — GEMINI ONLY.
+    """
 
-    ALL TESSERACT MODES REMOVED.
-    """
     if pil_image is None:
         logger.error("run_ocr called with None image.")
         return "", 0.0
 
-    # Step 1: pick active model
+    # Step 1 — model selection (unchanged)
     if model_override:
         active_model = model_override
         meta = {"src": "mode_override"}
@@ -130,60 +123,66 @@ def run_ocr(pil_image: Image.Image, langs: str = "eng+hin", psm: int = 6,
             image=pil_image,
             layout_hint=layout_type,
             layout_confidence=layout_confidence
-    )
+        )
 
-    logger.info(f"[OCR] Model: {active_model} | Mode: {meta.get('mode', 'unknown')} | Language: {langs}")
+    logger.info(f"[OCR] Model: {active_model} | Mode: {meta.get('mode')} | Lang={langs}")
 
-    api_key = get_config_value("gemini_api_key", "")
+    # 🔥 NEW — Always use round-robin API key
+    if api_key:
+        # Worker explicitly passed a key → use it
+        selected_api_key = api_key
+    else:
+        # Worker DIDN'T pass → rotate now
+        selected_api_key = get_next_api_key()
+
+    if not selected_api_key:
+        logger.error("❌ No API key available from round-robin provider.")
+        return "", 0.0
+
+    logger.info(f"🔑 Using API key: {selected_api_key[:6]}… (round-robin)")
+
 
     # ===================================================================
-    # ROUTE 1: GEMINI 2.5 PRO (Manual Override) — unchanged
+    # ROUTE 1: GEMINI 2.5 PRO — unchanged except key source
     # ===================================================================
     if active_model == "gemini-2.5-pro" and extract_complete_content:
-        if not api_key:
-            logger.error("Gemini 2.5 Pro requires API key.")
-        else:
-            try:
-                logger.info("⚙️ Running Gemini 2.5 Pro (manual override).")
-                text = extract_complete_content(pil_image, api_key)
-                if text and text.strip():
-                    logger.info(f"✅ Gemini Pro extraction succeeded ({len(text)} chars).")
-                    return text, 0.0
-                else:
-                    logger.warning("Gemini Pro returned empty output.")
-            except Exception as e:
-                logger.exception(f"Gemini Pro failed: {e}")
+        try:
+            logger.info("⚙️ Running Gemini 2.5 Pro Complete Extraction")
+            text = extract_complete_content(pil_image, selected_api_key)
+            if text and text.strip():
+                logger.info(f"✅ Gemini Pro extracted {len(text)} chars")
+                return text, 0.0
+            logger.warning("Gemini Pro returned empty text")
+        except Exception as e:
+            logger.exception(f"Gemini 2.5 Pro failed: {e}")
 
     # ===================================================================
-    # ROUTE 2: GEMINI FLASH/LITE — unchanged
+    # ROUTE 2: GEMINI FLASH/LITE — unchanged except key source
     # ===================================================================
-    if active_model.startswith("gemini-"):
-        if not api_key:
-            logger.error("Gemini API key missing.")
-            return "", 0.0
+    if active_model.startswith("gemini-") and run_gemini_ocr:
+        try:
+            logger.info(f"⚙️ Running Gemini OCR ({active_model}) for languages: {langs}")
 
-        if run_gemini_ocr:
-            try:
-                logger.info(f"⚙️ Running Gemini OCR: {active_model} for {langs}")
-                result = run_gemini_ocr(pil_image, api_key, active_model)
+            result = run_gemini_ocr(pil_image, selected_api_key, active_model)
 
-                # Normalize output (dict or tuple)
-                if isinstance(result, dict):
-                    text = result.get("text", "")
-                    conf = result.get("confidence", 0.95)
-                else:
-                    text, conf = result
+            # Normalize output
+            if isinstance(result, dict):
+                text = result.get("text", "")
+                conf = result.get("confidence", 0.95)
+            else:
+                text, conf = result
 
-                if text and not text.startswith("[Gemini OCR ERROR]"):
-                    logger.info(f"✅ Gemini OCR succeeded ({len(text)} chars)")
-                    return text, conf if conf else 0.0
-                else:
-                    logger.warning("Gemini OCR returned empty/error")
-            except Exception as e:
-                logger.exception(f"Gemini OCR failed: {e}")
+            if text and not text.startswith("[Gemini OCR ERROR]"):
+                logger.info(f"✅ Gemini OCR OK ({len(text)} chars)")
+                return text, conf if conf else 0.0
+
+            logger.warning("Gemini OCR returned empty/error")
+
+        except Exception as e:
+            logger.exception(f"Gemini Flash/Lite OCR failed: {e}")
 
     # ===================================================================
-    # END — No more Tesseract fallback
+    # END — NO FALLBACK
     # ===================================================================
-    logger.error("❌ No valid Gemini OCR output. Returning empty text.")
+    logger.error("❌ No valid OCR output from Gemini.")
     return "", 0.0

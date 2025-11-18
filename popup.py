@@ -495,7 +495,20 @@ class PopupWindow(QWidget):
                     # Clear buffer when Alt is released
                     QTimer.singleShot(100, self._clear_key_buffer)
 
+        # Add this check at the end, before return
+        if hasattr(self, 'scroll_area') and obj == self.scroll_area.viewport():
+            if event.type() == QEvent.Paint:
+                # Re-raise buttons after scroll viewport paints
+                QTimer.singleShot(0, self._raise_copy_buttons)
+        
         return super().eventFilter(obj, event)
+    
+    def _raise_copy_buttons(self):
+        """Keep copy buttons on top of textboxes."""
+        if hasattr(self, 'copy_extracted_btn'):
+            self.copy_extracted_btn.raise_()
+        if hasattr(self, 'copy_translated_btn'):
+            self.copy_translated_btn.raise_()
 
     def _on_mode_chosen(self, mode):
         """Handle mode (Text/Table) selection from ModeSelector."""
@@ -733,14 +746,21 @@ class PopupWindow(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
+        
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
+        
         self._init_ui_layout(layout)
+        
         scroll.setWidget(content)
-
+        # ✅ Store as instance variable
+        self.scroll_area = scroll
+        
+        # ✅ Install event filter here
+        self.scroll_area.viewport().installEventFilter(self)
+        
         main = QVBoxLayout(self)
         main.addWidget(scroll)
         self.setLayout(main)
@@ -905,15 +925,19 @@ class PopupWindow(QWidget):
         root.addWidget(self._with_card(self.preview_box))
 
         # --- Extracted Text ---
-        self.extracted_frame, self.extracted_box, ex_copy_btn = self._textbox_with_copy()
+        # ✅ REVERTED: Now returns 3 values
+        self.extracted_frame, self.extracted_box, self.copy_extracted_btn = self._textbox_with_copy()
 
+        # --- Extracted Text Row (label + copy button) ---
         row = QHBoxLayout()
-        row.addWidget(QLabel("Extracted Text"))
+        label = QLabel("Extracted Text")
+        label.setObjectName("sectionLabel")
+
+        row.addWidget(label)
         row.addStretch()
-        row.addWidget(ex_copy_btn)
+        row.addWidget(self.copy_extracted_btn)  # ✅ ADD HERE
 
         root.addLayout(row)
-        root.addWidget(self.extracted_frame)
 
         self.extracted_box.setMinimumHeight(100)
         self.extracted_box.setMaximumHeight(500)
@@ -999,27 +1023,28 @@ class PopupWindow(QWidget):
         root.addWidget(translate_container)
         root.addLayout(row)
 
-        # --- Translated Text (hidden until Translate) ---
-        self.translated_frame, self.translated_box, tr_copy_btn = self._textbox_with_copy()
+        # Create all components but keep them hidden initially
+        self.translated_frame, self.translated_box, self.copy_translated_btn = self._textbox_with_copy()
 
         # Create label explicitly
         self.tr_label = QLabel("Translated Text")
         self.tr_label.setObjectName("sectionLabel")
-        self.tr_label.setVisible(False)  # Hidden until translation
+        self.tr_label.setVisible(False)  # Hidden initially
 
-        # Row with label + copy button
+        # Row with label and copy button
         self.tr_row = QHBoxLayout()
         self.tr_row.addWidget(self.tr_label)
         self.tr_row.addStretch()
-        self.tr_row.addWidget(tr_copy_btn)
-        root.addLayout(self.tr_row)
+        self.tr_row.addWidget(self.copy_translated_btn)
+        self.tr_row_widget = QWidget()
+        self.tr_row_widget.setLayout(self.tr_row)
+        self.tr_row_widget.setVisible(False)   # Completely hidden
+        root.addWidget(self.tr_row_widget)
 
-        # Hide everything initially
-        tr_copy_btn.setVisible(False)
+        # ✅ HIDE ALL TRANSLATION COMPONENTS INITIALLY
+        self.tr_label.setVisible(False)
+        self.copy_translated_btn.setVisible(False)
         self.translated_frame.setVisible(False)
-
-        # Add the translated text frame
-        root.addWidget(self.translated_frame)
 
         # Box sizing & scrollbars
         self.translated_box.setMinimumHeight(100)
@@ -1036,11 +1061,8 @@ class PopupWindow(QWidget):
             save_key="translated_height"
         )
         self.translated_resizable.set_height(saved_translated_height)
-        self.translated_resizable.setVisible(False)
+        self.translated_resizable.setVisible(False)  # Hidden initially
         root.addWidget(self.translated_resizable)
-
-        # Save reference for theme refresh
-        self.copy_translated_btn = tr_copy_btn
 
         # Status label
         self.status_label = QLabel("")
@@ -1054,6 +1076,12 @@ class PopupWindow(QWidget):
         self._restore_last_langs()
         self.trans_lang.currentIndexChanged.connect(self._save_langs)
         
+        root.addStretch()
+        
+        # Initial raise
+        self.copy_extracted_btn.raise_()
+        self.copy_translated_btn.raise_()
+    
     def _set_capture_mode(self, mode):
         self.capture_mode = mode
         self.status_label.setText(f"Mode: {mode.title()}")
@@ -1520,107 +1548,66 @@ class PopupWindow(QWidget):
             save_config(self.config)
             logger.info("Removed Gemini API key.")
 
-
-        
     # ---------- unified text card ---------
     def _textbox_with_copy(self):
-        """Create textbox with enhanced table-aware copy button."""
         frame = QFrame()
         frame.setObjectName("textCard")
-        layout = QVBoxLayout(frame)
-        layout.setSpacing(0)
 
-        box = QTextEdit()
-        box.setObjectName("textEditBox")
-        box.setStyleSheet("background: transparent; border: none; padding: 4px;")
-        box.setContextMenuPolicy(Qt.CustomContextMenu)
-        box.customContextMenuRequested.connect(lambda _: None)
-        layout.addWidget(box)
+        # Main vertical layout
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(6, 6, 6, 4)
+        lay.setSpacing(4)
 
-        # Copy button
-        copy_btn = QPushButton(frame)
+        # ── 1. Top row: Copy button aligned right ──
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        
+        copy_btn = QPushButton(" Copy")
         copy_btn.setFixedHeight(22)
-        copy_btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         copy_btn.setCursor(Qt.PointingHandCursor)
-        copy_btn.setToolTip("Copy to clipboard (with table grid borders)")
-
+        copy_btn.setIconSize(QSize(14, 14))
         icon_path = COPY_ICON_DARK if self.current_theme == "dark" else COPY_ICON_LIGHT
         copy_btn.setIcon(QIcon(os.path.abspath(icon_path)))
-        copy_btn.setIconSize(QSize(14, 14))
-        copy_btn.setText(" Copy")
-
         copy_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {"rgba(0,0,0,0.04)" if self.current_theme == "light" else "rgba(255,255,255,0.06)"};
-                border: none;
-                border-radius: 6px;
+                border:none; border-radius:6px;
                 color: {"#0F172A" if self.current_theme == "light" else "#E2E8F0"};
-                font-weight: 500;
-                font-size: 10.5px;
-                padding: 2px 5px;
-                qproperty-iconSize: 14px;
+                font-size:11px; padding:2px 6px;
             }}
-            QPushButton:hover {{
-                background-color: rgba(62,156,246,0.15);
-            }}
+            QPushButton:hover {{ background-color:rgba(62,156,246,0.15); }}
         """)
+        
+        top_row.addStretch()  # push button to the right
+        top_row.addWidget(copy_btn)
+        lay.addLayout(top_row)
 
-        # ❌ REMOVED absolute positioning
+        # ── 2. QTextEdit (expanding) ──
+        box = QTextEdit()
+        box.setObjectName("textEditBox")
+        box.setStyleSheet("background:transparent; border:none; padding:6px;")
+        box.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        box.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(box, 1)  # stretch factor makes it expand
 
-        # ENHANCED COPY ACTION WITH TABLE GRID SUPPORT
+        # ── 3. Copy action ──
         def copy_action():
             from PySide6.QtCore import QMimeData
-            from core.postprocess import prepare_content_for_clipboard, extract_text_and_tables
-            
+            from core.postprocess import prepare_content_for_clipboard
             mime = QMimeData()
-            
-            # Get current content
             html = getattr(self, "_last_full_html", box.toHtml().strip())
             text = box.toPlainText().strip()
-            
-            if not text:
-                logger.info("No content to copy")
-                return
-            
-            # Check if we have tables
-            if '<table' in html.lower():
-                enhanced_html = prepare_content_for_clipboard(html)
-                structure = extract_text_and_tables(html)
-                logger.info(f"Copying content with {len(structure['tables'])} table(s) - Table Grid format")
-                
-                mime.setHtml(enhanced_html)
-                mime.setText(text)
-                
-                logger.info("✅ Table copied with Table Grid style (white background, dark borders)")
-                
-            else:
-                from core.postprocess import prepare_math_for_clipboard
-                html = prepare_math_for_clipboard(html)
-                html = html.replace("&lt;math", "<math")
-                html = html.replace("&lt;/math&gt;", "</math>")
-                html = html.replace("&lt;", "<").replace("&gt;", ">")
-                
-                mime.setHtml(html)
-                mime.setText(text)
-            
+            if "<table" in html.lower():
+                html = prepare_content_for_clipboard(html)
+            mime.setHtml(html)
+            mime.setText(text)
             QApplication.clipboard().setMimeData(mime)
-            
-            pos_global = copy_btn.mapToGlobal(copy_btn.rect().center())
-            pos_local = self.mapFromGlobal(pos_global)
+            pos_local = self.mapFromGlobal(copy_btn.mapToGlobal(copy_btn.rect().center()))
             self._show_copied(pos_local)
-            
-            logger.info("✅ Content copied to clipboard with grid formatting")
 
         copy_btn.clicked.connect(copy_action)
 
-        # Keep references
-        if not hasattr(self, "copy_extracted_btn"):
-            self.copy_extracted_btn = copy_btn
-        elif not hasattr(self, "copy_translated_btn"):
-            self.copy_translated_btn = copy_btn
-
-        # NEW → return button separately
-        return frame, box, copy_btn
+        return frame, box, copy_btn 
 
     # ADD this helper method to the PopupWindow class
     def _html_to_rtf(self, html: str) -> str:
@@ -1761,6 +1748,18 @@ class PopupWindow(QWidget):
         layout.addWidget(widget)
         frame.setObjectName("textCard")
         return frame
+
+    def _fix_copy_button_layouts(self):
+        """Force copy buttons to stay visible & prevent collapse after theme changes."""
+        btns = [
+            getattr(self, "copy_extracted_btn", None),
+            getattr(self, "copy_translated_btn", None)
+        ]
+        for btn in btns:
+            if btn:
+                btn.setVisible(True)
+                btn.update()
+                btn.repaint()
 
         
     def _animate_icon_hover(self, button, entering: bool):
@@ -2214,6 +2213,8 @@ class PopupWindow(QWidget):
                 }}
             """)
 
+        self._fix_copy_button_layouts()
+
         # --- Theme state ---
         self.copy_icon_opacity = 0.6 if theme == "dark" else 0.75
     
@@ -2404,9 +2405,7 @@ class PopupWindow(QWidget):
         """Handle OCR completion - hide loader BEFORE showing text."""
         # Handle dict results from Gemini (math mode with images)
         if isinstance(text, dict):
-            # Extract text component
             actual_text = text.get("text", "")
-            # Store additional data if needed
             if "math_images" in text:
                 self._math_images = text["math_images"]
             if "math_omml" in text:
@@ -2418,6 +2417,7 @@ class PopupWindow(QWidget):
         
         # Wait for hide animation, then show text
         QTimer.singleShot(150, lambda: self._display_ocr_result(text, translated))
+
         
     def _display_ocr_result(self, text, translated):
         """Display OCR results after loader is hidden."""
@@ -2428,19 +2428,13 @@ class PopupWindow(QWidget):
 
             # Render formatted content
             self._render_formatted_content(text)
-
-            # Show translation if available
-            if translated and translated.strip():
-                self.translated_box.setPlainText(translated)
-                self.translated_label.setVisible(True)
-                self.translated_resizable.setVisible(True)
-
             self.status_label.setText("✅ OCR Complete")
             QTimer.singleShot(2000, lambda: self.status_label.setVisible(False))
 
         except Exception as e:
             logger.exception(f"Display failed: {e}")
             self.extracted_box.setPlainText(text)
+
 
     def _on_ocr_failed(self, msg):
         """Handle OCR failure."""
@@ -2453,6 +2447,7 @@ class PopupWindow(QWidget):
     # =========================================================================
 
     def run_translation(self):
+        """Run translation and show all translation UI."""
         text = self.extracted_box.toPlainText().strip()
         if not text:
             self.status_label.setText("No text to translate.")
@@ -2464,8 +2459,10 @@ class PopupWindow(QWidget):
         # Clear old translation
         self.translated_box.clear()
 
-        # FIXED — use tr_label instead of translated_label
+        # ✅ SHOW ALL TRANSLATION UI COMPONENTS
         self.tr_label.setVisible(True)
+        self.copy_translated_btn.setVisible(True)
+        self.translated_frame.setVisible(True)
         self.translated_resizable.setVisible(True)
 
         # Show loader immediately
@@ -2488,6 +2485,8 @@ class PopupWindow(QWidget):
         """Handle translation completion - hide loader BEFORE showing text."""
         # Hide loader
         self._hide_loader(self.loader_translated, delay_ms=0)
+        
+        # ✅ Ensure all translation UI is visible
         self.tr_label.setVisible(True)
         self.copy_translated_btn.setVisible(True)
         self.translated_frame.setVisible(True)
@@ -2495,6 +2494,17 @@ class PopupWindow(QWidget):
 
         # Wait for hide, then show text
         QTimer.singleShot(150, lambda: self._display_translation(translated))
+
+
+    # 6. Add a method to hide translation UI (optional, for future use):
+
+    def _hide_translation_ui(self):
+        """Hide all translation UI components."""
+        self.tr_label.setVisible(False)
+        self.copy_translated_btn.setVisible(False)
+        self.translated_frame.setVisible(False)
+        self.translated_resizable.setVisible(False)
+        self.translated_box.clear()
 
     def _display_translation(self, translated):
         """Display translated text after loader is hidden."""
@@ -2620,8 +2630,8 @@ class PopupWindow(QWidget):
                 background-color: {bg};
                 color: {fg};
                 border: none;
+                /* ✅ REVERTED: No right padding needed */
                 padding: 6px;
-                padding-right: 40px;   /* 👈 prevents text overlapping copy button */
                 selection-background-color: {selection_bg};
             }}
         """

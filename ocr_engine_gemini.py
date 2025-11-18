@@ -13,24 +13,38 @@ from core.postprocess import normalize_bullets, convert_latex_to_mathml
 
 logger = logging.getLogger(__name__)
 
+# 🔥 NEW: round-robin API key provider
+try:
+    from core.gemini_pro_client import get_next_api_key
+except ImportError:
+    def get_next_api_key():
+        return None
+
+
 def run_gemini_ocr(pil_image: Image.Image, api_key: str, model_name: str):
     """
     Run OCR using Gemini API with enhanced math formula support.
 
-    Args:
-        pil_image (PIL.Image.Image): Input image for OCR.
-        api_key (str): Google Gemini API key.
-        model_name (str): Model name (gemini-2.5-flash-lite/flash/etc.)
-
-    Returns:
-        tuple: (extracted_text, confidence)
+    NOTE:
+        - The 'api_key' argument is intentionally ignored.
+        - Instead, we ALWAYS use round-robin API rotation.
     """
+
     if not model_name:
         logger.error("Gemini OCR failed: model_name not provided.")
         return "[Model not specified]", 0.0
 
+    # 🔥 ROUND-ROBIN API KEY — only source
+    selected_key = get_next_api_key()
+    if not selected_key:
+        logger.error("❌ No API key available from round-robin provider.")
+        return "[Gemini OCR ERROR: missing API key]", 0.0
+
+    logger.info(f"🔑 Using API key (RR): {selected_key[:6]}…  model={model_name}")
+
     try:
-        genai.configure(api_key=api_key)
+        # Configure the Gemini client
+        genai.configure(api_key=selected_key)
 
         # Convert image to Base64
         buffer = io.BytesIO()
@@ -40,7 +54,7 @@ def run_gemini_ocr(pil_image: Image.Image, api_key: str, model_name: str):
         logger.info(f"🔹 Gemini OCR started using model: {model_name}")
 
         model = genai.GenerativeModel(model_name)
-        
+
         # ENHANCED PROMPT FOR MATH FORMULAS
         prompt = """Extract all text exactly as shown in the image, including mathematical formulas.
 
@@ -48,76 +62,70 @@ CRITICAL RULES FOR MATH FORMULAS:
 
 1. **Mathematical Notation**: 
    - Use LaTeX notation for all math expressions
-   - Inline formulas: wrap in single $ signs: $x^2 + y^2 = z^2$
-   - Display formulas: wrap in double $$ signs: $$\\sum_{i=1}^{n}i^{3}=\\left(\\frac{n(n+1)}{2}\\right)^{2}$$
+   - Inline: wrap in $...$
+   - Display: wrap in $$...$$
 
-2. **Formula Components**:
-   - Superscripts: use ^ (e.g., x^2, e^{-x})
-   - Subscripts: use _ (e.g., a_i, x_{n+1})
-   - Fractions: \\frac{numerator}{denominator}
-   - Summation: \\sum_{lower}^{upper}
-   - Integrals: \\int_{a}^{b}
-   - Square roots: \\sqrt{x} or \\sqrt[n]{x}
-   - Greek letters: \\alpha, \\beta, \\gamma, \\theta, \\pi, etc.
-   - Parentheses: Use \\left( and \\right) for auto-sizing
+2. **Formula Rules**:
+   - Superscripts: x^2
+   - Subscripts: a_i
+   - Fractions: \\frac{a}{b}
+   - Sums: \\sum_{i=1}^{n}
+   - Integrals: \\int_{0}^{1}
+   - Greek: \\alpha, \\beta, \\theta
+   - Auto parentheses: \\left( ... \\right)
 
-3. **Text Content**:
-   - Preserve bullet points exactly: •, -, *, numbers like 1., 2.
-   - Keep Hindi and English text as-is
-   - Maintain line breaks for lists
+3. **Text**:
+   - Preserve Hindi + English exactly
+   - Preserve bullets • - *
+   - Preserve line breaks
 
-EXAMPLE INPUT IMAGE:
-∑ᵢ₌₁ⁿ i³ = (n(n+1)/2)²
-
-CORRECT OUTPUT:
-$$\\sum_{i=1}^{n}i^{3}=\\left(\\frac{n(n+1)}{2}\\right)^{2}$$
-
-NOW EXTRACT:"""
+NOW EXTRACT:
+"""
 
         response = model.generate_content([
             {"text": prompt},
             {"inline_data": {"mime_type": "image/png", "data": img_b64}},
         ])
-        
+
         text = getattr(response, "text", "").strip()
 
         if not text:
             logger.warning("Gemini returned empty response")
             return "", 0.0
 
-        # Post-processing
-        if text:
-            # Normalize bullets
-            text = normalize_bullets(text)
-            
-            # Convert LaTeX to MathML
-            text = convert_latex_to_mathml(text)
-            from core.postprocess import render_latex_to_image, convert_mathml_to_omml
-            import re, tempfile, os
+        # ─────────────────────────────────────────────
+        # POST-PROCESSING PIPELINE (unchanged)
+        # ─────────────────────────────────────────────
+        text = normalize_bullets(text)
+        text = convert_latex_to_mathml(text)
 
-            # If math is present, create image + OMML version
-            if re.search(r'\$.*?\$', text):
-                latex_exprs = re.findall(r'\$+([^$]+)\$+', text)
-                images = []
-                omml_versions = []
-                for expr in latex_exprs:
-                    temp_path = os.path.join(tempfile.gettempdir(), f"math_{hash(expr)}.png")
-                    img_path = render_latex_to_image(expr, temp_path)
-                    if img_path:
-                        images.append(img_path)
-                    omml_versions.append(convert_mathml_to_omml(latex_exprs[0]))
+        from core.postprocess import render_latex_to_image, convert_mathml_to_omml
+        import re, tempfile, os
 
-                logger.info(f"Generated {len(images)} math previews and OMML data")
+        # Math detection
+        if re.search(r'\$.*?\$', text):
+            latex_exprs = re.findall(r'\$+([^$]+)\$+', text)
+            images = []
+            omml_versions = []
 
-                return {
-                    "text": text,
-                    "math_images": images,
-                    "math_omml": omml_versions
-                }, None
+            for expr in latex_exprs:
+                temp_path = os.path.join(tempfile.gettempdir(), f"math_{hash(expr)}.png")
+                img_path = render_latex_to_image(expr, temp_path)
+                if img_path:
+                    images.append(img_path)
+                omml_versions.append(convert_mathml_to_omml(expr))
 
-            logger.info(f"✅ Gemini OCR completed ({len(text)} chars)")
-            logger.debug(f"Math formulas detected: {text.count('<math')}")
-        
+            logger.info(f"Generated {len(images)} math previews and OMML data")
+
+            return {
+                "text": text,
+                "math_images": images,
+                "math_omml": omml_versions
+            }, None
+
+        logger.info(f"✅ Gemini OCR completed ({len(text)} chars)")
+        logger.debug(f"Math formulas detected: {text.count('<math')}")
+
         return text, None
 
     except Exception as e:
