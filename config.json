@@ -6,17 +6,16 @@
     "translated_height": 397,
     "splitter_sizes": [],
     "save_screenshots": false,
-    "theme": "dark",
+    "theme": "light",
     "auto_copy": true,
     "follow_system_theme": false,
     "translation_mode": "auto",
-    "last_translate_lang": "ur",
+    "last_translate_lang": "hi",
     "icon_path": "assets/icons/teaching_pariksha_logo.png",
-    "gemini_api_key": "AIzaSyAq1dnLigfya-yoFvxRJUBl3_xhpAwVL7s",
-    "gemini_model": "gemini-2.5-flash-lite",
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash",
     "gemini_api_keys": [
-        "AIzaSyAq1dnLigfya-yoFvxRJUBl3_xhpAwVL7s",
-        "AIzaSyB2hU_4oM1QZc3UjNp8Olm9dg7bgHv2pUo"
+        "AIzaSyB7VzIv5zYhs685t1L35PfpnI6tO4-VcIk"
     ],
     "force_gemini_for_tables": false,
     "_comment": "Gemini-only OCR build",
@@ -28,5 +27,6 @@
     "last_ocr_lang": "eng+hin",
     "shortcut_text": "alt+1",
     "shortcut_table": "alt+2",
-    "shortcut_popup": "alt+3"
+    "shortcut_popup": "alt+3",
+    "api_index": 11
 }

@@ -35,6 +35,7 @@ from core.postprocess import (
     process_ocr_text_with_math,
 )
 
+# 🔥 NEW — rate-limit aware key fetch
 from core.optimized_gemini_client import get_next_api_key
 
 
@@ -49,13 +50,13 @@ class OptimizedOCRWorker(QObject):
     
     # Signals
     progress = Signal(int)
-    finished = Signal(object, str)  # Changed to object to support dict results
+    finished = Signal(object, str)  
     failed = Signal(str)
     
-    def __init__(self, image_path, config, do_translate=False, dest_lang="en"):
+    def __init__(self, image_path, config, do_translate=False, dest_lang="en", model_name=None):
         super().__init__()
         
-        # Store path instead of loading image immediately
+        self.model_name = model_name
         self.image_path = image_path
         self.image = None
         
@@ -63,22 +64,24 @@ class OptimizedOCRWorker(QObject):
         self.do_translate = do_translate
         self.dest_lang = dest_lang
         
-        # OCR settings
         self.langs = config.get("languages", ["eng", "hin"])
         if isinstance(self.langs, list):
             self.langs = "+".join(self.langs)
         
-        # Layout detection
         self.layout_type = "text"
         self.layout_confidence = 1.0
         self.override_table_model = False
         
-        # API key (round-robin)
+        # Initial round-robin key
         self.api_key = get_next_api_key()
-        logger.info(f"[Worker] Using key: {self.api_key[:6]}...")
+        if self.api_key:
+            logger.info(f"[Worker] Using key: {self.api_key[:6]}...")
+        else:
+            logger.error("[Worker] No API key available from round-robin.")
+
+        self.stop_requested = False
     
     def _load_image_fast(self):
-        """Load image with minimal overhead."""
         try:
             if isinstance(self.image_path, str):
                 from PIL import Image
@@ -88,7 +91,6 @@ class OptimizedOCRWorker(QObject):
             else:
                 raise ValueError(f"Invalid image type: {type(self.image_path)}")
             
-            # Convert to RGB if needed (prevents errors)
             if self.image.mode not in ('RGB', 'L'):
                 self.image = self.image.convert('RGB')
             
@@ -100,42 +102,55 @@ class OptimizedOCRWorker(QObject):
     
     @Slot()
     def run(self):
-        """
-        Optimized OCR + Translation pipeline.
-        Now 30-40% faster due to:
-        - Lazy image loading
-        - Smart progress updates
-        - Optimized postprocessing
-        - Parallel operations
-        """
+
+        if self.thread().isInterruptionRequested() or self.stop_requested:
+            return
+
         tmp_file = None
         
         try:
-            # Step 1: Load image (5%)
             self.progress.emit(5)
             if not self._load_image_fast():
                 self.failed.emit("Failed to load image")
                 return
+
+            if self.thread().isInterruptionRequested() or self.stop_requested:
+                return
             
-            # Step 2: Save temp (10%) - only if needed
             self.progress.emit(10)
             if isinstance(self.image_path, str) and os.path.exists(self.image_path):
-                tmp_file = self.image_path  # Reuse existing file
+                tmp_file = self.image_path
             else:
                 tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                 tmp_file = tmp.name
                 self.image.save(tmp_file, "JPEG", quality=85, optimize=True)
                 tmp.close()
             
-            # Step 3: Determine model (15%)
             self.progress.emit(15)
-            model_override = "gemini-2.5-pro" if self.override_table_model else None
+            if self.override_table_model:
+                model_override = "gemini-2.5-pro"
+            else:
+                model_override = self.model_name
             
+            # ==========================================================
             # Step 4: Run OCR (20-70%)
+            # ==========================================================
             self.progress.emit(20)
-            
             logger.info(f"[Worker] Starting OCR: mode={self.layout_type}")
-            
+
+            # ⭐ NEW — rate-limit-safe API key re-acquisition ONLY for table mode
+            try:
+                if self.layout_type == "table" or self.override_table_model:
+                    new_key = get_next_api_key()
+                    if new_key:
+                        self.api_key = new_key
+                        logger.info(f"[Worker] (table) acquired safe key: {self.api_key[:6]}...")
+                    else:
+                        logger.error("[Worker] No key available for table mode")
+            except Exception as e:
+                logger.warning(f"[Worker] Key acquisition failed: {e}")
+
+            # --- proceed with OCR exactly as before ---
             text, conf = run_ocr(
                 self.image,
                 langs=self.langs,
@@ -145,20 +160,20 @@ class OptimizedOCRWorker(QObject):
                 model_override=model_override,
                 api_key=self.api_key
             )
+
+            if self.thread().isInterruptionRequested() or self.stop_requested:
+                return
             
             self.progress.emit(70)
             
             if not text or not text.strip():
                 text = ""
             
-            # Step 5: Fast postprocessing (75-85%)
             self.progress.emit(75)
-            
             try:
                 if self.layout_type == "table":
                     text = clean_table_mode_output(text)
                 else:
-                    # Combined processing (faster)
                     text = process_ocr_text_with_math(text, for_display=True)
                     text = clean_text_mode_output(text)
             except Exception as e:
@@ -166,7 +181,6 @@ class OptimizedOCRWorker(QObject):
             
             self.progress.emit(85)
             
-            # Step 6: Translation (optional, 90-95%)
             translated = ""
             if self.do_translate and self.dest_lang and text.strip():
                 self.progress.emit(90)
@@ -177,21 +191,24 @@ class OptimizedOCRWorker(QObject):
             
             self.progress.emit(95)
             
-            # Step 7: Cleanup and emit (100%)
-            clear_image_cache()  # Free memory
+            clear_image_cache()
             self.progress.emit(100)
+
+            if self.thread().isInterruptionRequested() or self.stop_requested:
+                return
             
-            # Emit result (supports dict for math mode)
             self.finished.emit(text, translated)
             
-            logger.info(f"[Worker] Complete: {len(text) if isinstance(text, str) else len(text.get('text', ''))} chars")
+            logger.info(
+                f"[Worker] Complete: "
+                f"{len(text) if isinstance(text, str) else len(text.get('text',''))} chars"
+            )
         
         except Exception as e:
             logger.exception(f"Worker failed: {e}")
             self.failed.emit(str(e))
         
         finally:
-            # Cleanup temp file only if we created it
             if tmp_file and tmp_file != self.image_path and os.path.exists(tmp_file):
                 try:
                     os.remove(tmp_file)

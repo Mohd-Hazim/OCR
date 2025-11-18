@@ -10,6 +10,7 @@ import logging
 from PIL import Image
 from functools import lru_cache
 from utils.config import get_config_value
+from core.table_prompt import TABLE_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,26 @@ except ImportError:
     def get_next_api_key():
         return None
 
+
+# ==========================================================
+# ASYNC SUPPORT FOR THREADS
+# ==========================================================
+import asyncio
+
+def await_in_thread(coro):
+    """
+    Run an async coroutine inside a worker thread safely.
+    Needed because Gemini Flash models return async coroutines.
+    """
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.close()
+        except:
+            pass
 
 # =====================================================================
 # OPTIMIZED MODEL SELECTION (cached)
@@ -178,14 +199,20 @@ def run_ocr(
     # ===================================================================
     if active_model == "gemini-2.5-pro" and extract_complete_content:
         try:
-            logger.info("⚡ Fast table extraction")
-            text = extract_complete_content(pil_image, api_key)
+            logger.info("⚡ Fast table extraction (STRICT HTML MODE)")
             
-            if text and text.strip():
-                logger.info(f"✅ Table OK ({len(text)} chars)")
+            text = extract_complete_content(
+                pil_image,
+                api_key,
+                prompt=TABLE_EXTRACTION_PROMPT   # ← STRICT PROMPT HERE
+            )
+
+            if text and "<table" in text.lower():
+                logger.info(f"✅ Strict table extracted ({len(text)} chars)")
                 return text, 0.0
-            
-            logger.warning("Empty table result")
+
+            logger.warning("⚠ Strict mode returned no table or empty")
+        
         except Exception as e:
             logger.exception(f"Table extraction failed: {e}")
     
@@ -198,9 +225,20 @@ def run_ocr(
             
             # Use async version if available (non-blocking)
             if meta.get("mode") == "text":
+                # Always use flash-lite style extraction
                 result = extract_text_async(pil_image, api_key)
+
+                # If async coroutine → await
+                if asyncio.iscoroutine(result):
+                    result = await_in_thread(result)
+
             else:
+                # TABLE mode → keep Pro model
                 result = run_gemini_ocr(pil_image, api_key, active_model)
+
+                # If coroutine → await
+                if asyncio.iscoroutine(result):
+                    result = await_in_thread(result)
             
             # Normalize output
             if isinstance(result, dict):

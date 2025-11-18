@@ -373,6 +373,8 @@ class PopupWindow(QWidget):
 
         from core.capture import initialize_capture_debug
         initialize_capture_debug()
+        self._ocr_cancelling = False
+
     
     def show_main_window(self):
         """Show the main GUI when the 'popup' hotkey is pressed."""
@@ -936,6 +938,28 @@ class PopupWindow(QWidget):
         row.addWidget(label)
         row.addStretch()
         row.addWidget(self.copy_extracted_btn)  # ✅ ADD HERE
+        
+        # --- CANCEL OCR BUTTON ---
+        self.cancel_ocr_btn = QPushButton("Cancel")
+        self.cancel_ocr_btn.setFixedHeight(22)
+        self.cancel_ocr_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_ocr_btn.setVisible(False)       # hidden by default
+        self.cancel_ocr_btn.clicked.connect(self._cancel_ocr)
+        self.cancel_ocr_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #DC2626;
+                border: none;
+                border-radius: 6px;
+                color: white;
+                font-size: 11px;
+                padding: 2px 10px;
+            }
+            QPushButton:hover {
+                background-color: #E53935;
+            }
+        """)
+        row.addWidget(self.cancel_ocr_btn)
+
 
         root.addLayout(row)
 
@@ -1529,7 +1553,6 @@ class PopupWindow(QWidget):
                 current_keys.append(key)
                 self.config["gemini_api_keys"] = current_keys
                 self.api_key_list.addItem(key)
-                self.active_key_combo.addItem(key)
                 save_config(self.config)
                 logger.info("Added new Gemini API key.")
             else:
@@ -1537,16 +1560,20 @@ class PopupWindow(QWidget):
 
     def remove_api_key(self):
         """Remove selected Gemini API key."""
-        for item in self.api_key_list.selectedItems():
+        selected = self.api_key_list.selectedItems()
+        if not selected:
+            return
+
+        for item in selected:
             key = item.text()
             self.api_key_list.takeItem(self.api_key_list.row(item))
+
+            # Remove from config list
             if key in self.config.get("gemini_api_keys", []):
                 self.config["gemini_api_keys"].remove(key)
-            if self.active_key_combo.currentText() == key:
-                self.config["gemini_api_key"] = ""
-                self.active_key_combo.setCurrentIndex(-1)
-            save_config(self.config)
-            logger.info("Removed Gemini API key.")
+
+        save_config(self.config)
+        logger.info("Removed Gemini API key.")
 
     # ---------- unified text card ---------
     def _textbox_with_copy(self):
@@ -2301,11 +2328,42 @@ class PopupWindow(QWidget):
         self.raise_()
         self.activateWindow()
 
+        # ⭐ NEW: Show Cancel OCR button
+        self._ocr_cancelling = False
+        if hasattr(self, "cancel_ocr_btn"):
+            self.cancel_ocr_btn.setVisible(True)
+            self.cancel_ocr_btn.raise_()
+
         # ✅ Show loader instantly
         self._show_loader(self.loader_extracted, immediate=True)
 
         # ✅ Allow Qt to render loader before heavy preview processing
         QTimer.singleShot(100, lambda: self._start_ocr_worker(image, x, y, w, h))
+
+        
+    def _cancel_ocr(self):
+        """User-triggered cancellation of OCR."""
+        self._ocr_cancelling = True
+        
+        # Stop the worker thread safely
+        try:
+            if hasattr(self, "worker"):
+                self.worker.stop_requested = True   # for worker-side checks (optional)
+            if hasattr(self, "thread"):
+                self.thread.requestInterruption()
+        except:
+            pass
+        
+        # Hide loader
+        self._hide_loader(self.loader_extracted)
+        
+        # Hide cancel button
+        self.cancel_ocr_btn.setVisible(False)
+        
+        self.status_label.setText("❌ OCR Cancelled")
+        self.status_label.setVisible(True)
+        QTimer.singleShot(2000, lambda: self.status_label.setVisible(False))
+
 
     class _PreviewLoaderWorker(QObject):
         """Small worker to load preview image off the UI thread."""
@@ -2369,8 +2427,9 @@ class PopupWindow(QWidget):
         self.worker = OCRWorker(
             temp_path,
             self.config,
-            do_translate=False,  # Translation is separate
-            dest_lang="en"
+            do_translate=False,
+            dest_lang="en",
+            model_name=self.config.get("gemini_model", "gemini-2.5-flash-lite")
         )
         
         # Set layout detection parameters
@@ -2403,6 +2462,7 @@ class PopupWindow(QWidget):
 
     def _on_ocr_done(self, text, translated):
         """Handle OCR completion - hide loader BEFORE showing text."""
+        self.cancel_ocr_btn.setVisible(False)
         # Handle dict results from Gemini (math mode with images)
         if isinstance(text, dict):
             actual_text = text.get("text", "")
@@ -2438,6 +2498,7 @@ class PopupWindow(QWidget):
 
     def _on_ocr_failed(self, msg):
         """Handle OCR failure."""
+        self.cancel_ocr_btn.setVisible(False)
         self._hide_loader(self.loader_extracted)
         self.status_label.setText(f"OCR failed: {msg}")
         self.status_label.setVisible(True)
@@ -2459,15 +2520,15 @@ class PopupWindow(QWidget):
         # Clear old translation
         self.translated_box.clear()
 
-        # ✅ SHOW ALL TRANSLATION UI COMPONENTS
         self.tr_label.setVisible(True)
         self.copy_translated_btn.setVisible(True)
         self.translated_frame.setVisible(True)
         self.translated_resizable.setVisible(True)
 
+        self._reposition_loader(self.loader_translated, self.translated_box)
+
         # Show loader immediately
         self._show_loader(self.loader_translated, immediate=True)
-
         # Start worker thread
         self._tran_thread = QThread()
         self._tran_worker = TranslatorThread(text, dest)

@@ -413,6 +413,39 @@ def clean_text_mode_output(text: str) -> str:
     
     return text.strip()
 
+# ===================================================================
+# TABLE STRUCTURE FIXER (NEW)
+# ===================================================================
+
+def enforce_table_integrity(html: str) -> str:
+    """
+    Ensures all table rows have equal number of columns.
+    Prevents broken tables from Gemini output.
+    """
+    from bs4 import BeautifulSoup
+    
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return html
+
+    rows = table.find_all("tr")
+    max_cols = 0
+
+    # Count max columns
+    for tr in rows:
+        cols = len(tr.find_all(["td", "th"]))
+        if cols > max_cols:
+            max_cols = cols
+
+    # Add missing cells
+    for tr in rows:
+        cells = tr.find_all(["td", "th"])
+        missing = max_cols - len(cells)
+        for _ in range(missing):
+            tr.append(soup.new_tag("td"))
+
+    return str(table)
 
 def clean_table_mode_output(html_or_text: str) -> str:
     """Table mode pipeline - preserves table structure with transparent background."""
@@ -421,9 +454,13 @@ def clean_table_mode_output(html_or_text: str) -> str:
     
     if "<table" not in html_or_text.lower():
         return html_or_text
-    
-    # Keep table structure with transparent background and dark borders
+
+    # 1) Fix broken tables (IMPORTANT)
+    html_or_text = enforce_table_integrity(html_or_text)
+
+    # 2) Style for Word
     return prepare_table_for_word(html_or_text)
+
 
 
 def clean_math_mode_output(text: str, for_display: bool = True) -> str:
