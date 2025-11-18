@@ -12,22 +12,16 @@ from functools import lru_cache
 from utils.config import get_config_value
 from core.table_prompt import TABLE_EXTRACTION_PROMPT
 
+# Correct optimized client
+from core.optimized_gemini_client import (
+    extract_complete_content,
+    extract_text_async,
+    optimize_image_for_api,
+    get_next_api_key
+)
 logger = logging.getLogger(__name__)
-
-# Import optimized Gemini client
-try:
-    from core.optimized_gemini_client import (
-        extract_complete_content,
-        extract_text_async,
-        optimize_image_for_api
-    )
-    logger.info("Using optimized Gemini client")
-except Exception as e:
-    logger.error(f"Optimized Gemini client import failed: {e}")
-    from core.optimized_gemini_client import extract_complete_content
-    extract_text_async = None
-    optimize_image_for_api = None
-
+# Gemini OCR engine for text
+from core.ocr_engine_gemini import run_gemini_ocr
 
 try:
     from core.ocr_engine_gemini import run_gemini_ocr
@@ -184,6 +178,20 @@ def run_ocr(
         logger.error("No API key available")
         return "", 0.0
     
+    if api_key == "NO_KEYS":
+        return (
+            "❗ API key required.\n"
+            "Please add a Gemini API key in Settings.",
+            0.0
+        )
+
+    if api_key == "ALL_KEYS_EXHAUSTED":
+        return (
+            "⛔ Daily table extraction limit reached for all API keys.\n"
+            "Add another account key or please try again tomorrow.",
+            0.0
+        )
+
     logger.info(f"[OCR] Model={active_model} | Mode={meta.get('mode')}")
     
     # 3. Smart DPI handling (only if needed)
@@ -206,6 +214,13 @@ def run_ocr(
                 api_key,
                 prompt=TABLE_EXTRACTION_PROMPT   # ← STRICT PROMPT HERE
             )
+
+            if text == "KEY_DAILY_EXHAUSTED":
+                return (
+                    "⚠️ This API key has exhausted its daily quota.\n"
+                    "Try another key or switch model.",
+                    0.0
+    )
 
             if text and "<table" in text.lower():
                 logger.info(f"✅ Strict table extracted ({len(text)} chars)")
