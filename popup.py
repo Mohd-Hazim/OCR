@@ -405,8 +405,13 @@ class PopupWindow(QWidget):
     def _finish_record_shortcut(self, box, final_text):
         box.setText(final_text)
         box.recording = False
+
+        # Save new shortcut
         self.config[box.key_name] = final_text
         save_config(self.config)
+
+        # 🔥 IMPORTANT: Reload hotkeys so old shortcuts stop working
+        self._reload_hotkeys()
 
     def _clear_key_buffer(self):
         """Clear the key buffer."""
@@ -425,6 +430,15 @@ class PopupWindow(QWidget):
         for box in [self.shortcut_text_box, self.shortcut_table_box, self.shortcut_popup_box]:
             if hasattr(box, "recording") and box.recording:
                 if event.type() == QEvent.KeyPress:
+
+                    # 🚨 ESC = CANCEL shortcut and restore old value
+                    if event.key() == Qt.Key_Escape:
+                        box.recording = False
+                        old_value = self.config.get(box.key_name, "")
+                        box.setText(old_value)
+                        return True
+
+                    # Normal key recording logic
                     mods = []
                     if event.modifiers() & Qt.ControlModifier: mods.append("ctrl")
                     if event.modifiers() & Qt.ShiftModifier: mods.append("shift")
@@ -1480,6 +1494,7 @@ class PopupWindow(QWidget):
 
         # ============= CLOSE PANEL =============
         if force_close or self.settings_panel.isVisible():
+            self._cancel_shortcut_recording()
             # --- Fade out overlay smoothly ---
             if self._overlay_widget.isVisible():
                 if not isinstance(self._overlay_widget.graphicsEffect(), QGraphicsOpacityEffect):
@@ -3303,7 +3318,37 @@ class PopupWindow(QWidget):
         fade_in.finished.connect(apply_theme_and_fade_out)
         fade_in.start()
         self._theme_fade_in_anim = fade_in
+        
+    def _reload_hotkeys(self):
+        import keyboard
 
+        # Remove ALL previously registered hotkeys
+        keyboard.clear_all_hotkeys()
+
+        # Load new shortcut values
+        text_sc = self.config.get("shortcut_text", "alt+t+1")
+        table_sc = self.config.get("shortcut_table", "alt+t+2")
+        popup_sc = self.config.get("shortcut_popup", "alt+t+p")
+
+        # Re-register hotkeys
+        keyboard.add_hotkey(text_sc, lambda: self.trigger_text.emit(), suppress=True)
+        keyboard.add_hotkey(table_sc, lambda: self.trigger_table.emit(), suppress=True)
+        keyboard.add_hotkey(popup_sc, lambda: self.trigger_popup.emit(), suppress=True)
+
+        print("🔁 Hotkeys reloaded.")
+    
+    def _cancel_shortcut_recording(self):
+        for box in [
+            self.shortcut_text_box,
+            self.shortcut_table_box,
+            self.shortcut_popup_box
+        ]:
+            if hasattr(box, "recording") and box.recording:
+                box.recording = False
+
+                # restore previous key from config
+                old_value = self.config.get(box.key_name, "")
+                box.setText(old_value)
         
 def run_app():
     from PySide6.QtCore import Qt, QCoreApplication, QTimer
