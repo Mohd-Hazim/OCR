@@ -1,0 +1,251 @@
+# core/paddle_client.py - COMPATIBLE VERSION
+"""
+PaddleOCR Client with proper Hindi+English bilingual support.
+Compatible with PaddleOCR 2.7.0+
+
+Key fixes:
+- Uses 'en' model for multilingual (works better than 'hi' for mixed text)
+- Removes deprecated 'use_gpu' parameter
+- Robust output parsing
+- Minimal preprocessing
+"""
+import os
+import logging
+import numpy as np
+from paddleocr import PaddleOCR
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# Disable MKLDNN to prevent crashes
+# ------------------------------------------------------------------
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+
+class PaddleOCRClient:
+    """Singleton PaddleOCR client with bilingual support."""
+    
+    _instance = None
+    _lang_instances = {}  # Cache for different language models
+
+    @classmethod
+    def get_instance(cls, lang='en'):
+        """
+        Get or create PaddleOCR instance for specified language.
+        
+        Args:
+            lang: Language code
+                - 'en' for English
+                - 'hindi' or 'hi' for Hindi  
+                - 'multilingual' for Hindi+English (uses 'en' model)
+        
+        Returns:
+            PaddleOCR instance
+        """
+        # Normalize language codes
+        if lang in ['hin', 'hindi', 'hi']:
+            lang = 'hindi'
+        elif lang in ['eng+hin', 'hin+eng', 'bilingual', 'multilingual']:
+            # Use 'en' model for multilingual - it handles mixed text better
+            lang = 'multilingual'
+        elif lang in ['eng', 'en']:
+            lang = 'en'
+        
+        # Return cached instance if available
+        if lang in cls._lang_instances:
+            logger.debug(f"Using cached PaddleOCR instance for lang={lang}")
+            return cls._lang_instances[lang]
+        
+        logger.info(f"Initializing PaddleOCR for language: {lang}")
+        
+        try:
+            # Disable paddle MKLDNN via API if available
+            try:
+                import paddle
+                if hasattr(paddle, 'set_flags'):
+                    paddle.set_flags({'FLAGS_use_mkldnn': False})
+            except Exception as e:
+                logger.warning(f"Could not set paddle flags: {e}")
+            
+            # Common parameters (compatible with PaddleOCR 2.7.0+)
+            common_params = {
+                'use_angle_cls': True,       # Detect text rotation
+                'enable_mkldnn': False,      # Disable MKLDNN
+                'show_log': False,           # Reduce console spam
+                'det_db_thresh': 0.3,        # Detection threshold
+                'det_db_box_thresh': 0.5,    # Box threshold
+            }
+            
+            # Initialize PaddleOCR with appropriate language model
+            if lang == 'multilingual':
+                # For Hindi+English bilingual text
+                # Use 'en' model which surprisingly works better for mixed scripts
+                ocr = PaddleOCR(
+                    lang='en',               # English model handles mixed well
+                    **common_params
+                )
+                logger.info("✅ PaddleOCR initialized for multilingual (using 'en' model)")
+                
+            elif lang == 'hindi':
+                # Hindi-only mode
+                ocr = PaddleOCR(
+                    lang='hi',               # Hindi model
+                    **common_params
+                )
+                logger.info("✅ PaddleOCR initialized for Hindi")
+                
+            else:
+                # English-only mode
+                ocr = PaddleOCR(
+                    lang='en',
+                    **common_params
+                )
+                logger.info("✅ PaddleOCR initialized for English")
+            
+            # Cache the instance
+            cls._lang_instances[lang] = ocr
+            return ocr
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize PaddleOCR: {e}")
+            raise
+
+
+def run_paddle_ocr(pil_image: Image.Image, lang: str = 'multilingual') -> tuple:
+    """
+    Run PaddleOCR on a PIL Image with proper bilingual support.
+    
+    Args:
+        pil_image: PIL Image object
+        lang: Language code ('en', 'hindi', 'multilingual')
+        
+    Returns:
+        tuple: (extracted_text, average_confidence)
+    """
+    if pil_image is None:
+        logger.error("run_paddle_ocr called with None image")
+        return "", 0.0
+
+    try:
+        # Get appropriate OCR instance
+        ocr = PaddleOCRClient.get_instance(lang)
+        
+        # Minimal preprocessing - just ensure RGB
+        if pil_image.mode not in ('RGB', 'L'):
+            pil_image = pil_image.convert('RGB')
+        
+        # Optional: Add small padding to help with edge detection
+        from PIL import ImageOps
+        pil_image = ImageOps.expand(pil_image, border=10, fill='white')
+        
+        # Convert to numpy array
+        img_array = np.array(pil_image)
+        
+        # Run OCR
+        logger.info(f"Running PaddleOCR with lang={lang}, image size={pil_image.size}")
+        result = ocr.ocr(img_array, cls=True)
+        
+        # Handle empty results
+        if not result:
+            logger.warning("PaddleOCR returned None result")
+            return "", 0.0
+        
+        if not result[0]:
+            logger.warning("PaddleOCR found no text")
+            return "", 0.0
+        
+        # Parse results with robust error handling
+        text_lines = []
+        confidences = []
+        
+        for line in result[0]:
+            try:
+                # PaddleOCR output format: [bbox, (text, confidence)]
+                # where bbox is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                
+                if not line or len(line) < 2:
+                    logger.debug(f"Skipping invalid line: {line}")
+                    continue
+                
+                # Extract text and confidence
+                text_data = line[1]
+                
+                if isinstance(text_data, (tuple, list)) and len(text_data) >= 2:
+                    text = str(text_data[0])
+                    conf = float(text_data[1])
+                else:
+                    logger.warning(f"Unexpected text_data format: {text_data}")
+                    continue
+                
+                # Skip empty text
+                if not text or not text.strip():
+                    continue
+                
+                text_lines.append(text)
+                confidences.append(conf)
+                
+            except Exception as e:
+                logger.warning(f"Error parsing line {line}: {e}")
+                continue
+        
+        # Combine results
+        if not text_lines:
+            logger.warning("No valid text extracted")
+            return "", 0.0
+        
+        full_text = "\n".join(text_lines)
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        
+        logger.info(f"✅ PaddleOCR extracted {len(text_lines)} lines, "
+                   f"{len(full_text)} chars, avg confidence: {avg_conf:.2f}")
+        
+        return full_text, avg_conf
+
+    except Exception as e:
+        logger.exception(f"PaddleOCR failed: {e}")
+        return "", 0.0
+
+
+def run_paddle_ocr_multi_lang(pil_image: Image.Image, langs: list = None) -> tuple:
+    """
+    Run PaddleOCR with multiple language attempts for best results.
+    
+    This function tries different language models and returns the best result.
+    Useful when you're unsure if text is Hindi, English, or mixed.
+    
+    Args:
+        pil_image: PIL Image object
+        langs: List of languages to try (default: ['multilingual', 'hindi', 'en'])
+        
+    Returns:
+        tuple: (best_text, best_confidence)
+    """
+    if langs is None:
+        # Try multilingual first (best for mixed), then fallback
+        langs = ['multilingual', 'hindi', 'en']
+    
+    best_text = ""
+    best_conf = 0.0
+    
+    for lang in langs:
+        try:
+            text, conf = run_paddle_ocr(pil_image, lang=lang)
+            
+            # Keep the result with highest confidence AND non-empty text
+            if conf > best_conf and text.strip():
+                best_text = text
+                best_conf = conf
+                logger.info(f"Best result so far from lang={lang}: conf={conf:.2f}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to run OCR with lang={lang}: {e}")
+            continue
+    
+    if best_text:
+        logger.info(f"✅ Multi-lang OCR complete. Best: conf={best_conf:.2f}")
+    else:
+        logger.warning("⚠️ Multi-lang OCR found no text")
+    
+    return best_text, best_conf

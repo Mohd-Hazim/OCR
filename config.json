@@ -1,0 +1,30 @@
+{
+    "window_width": 520,
+    "window_height": 620,
+    "preview_height": 250,
+    "extracted_height": 195,
+    "translated_height": 397,
+    "splitter_sizes": [],
+    "save_screenshots": false,
+    "theme": "light",
+    "auto_copy": true,
+    "follow_system_theme": false,
+    "translation_mode": "auto",
+    "last_translate_lang": "en",
+    "icon_path": "assets/icons/teaching_pariksha_logo.png",
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash-lite",
+    "gemini_api_keys": [],
+    "force_gemini_for_tables": false,
+    "_comment": "Gemini-only OCR build",
+    "languages": [
+        "eng",
+        "hin"
+    ],
+    "use_gemini_api": true,
+    "last_ocr_lang": "eng+hin",
+    "shortcut_text": "alt+1",
+    "shortcut_table": "alt+2",
+    "shortcut_popup": "alt+3",
+    "api_index": 0
+}
